@@ -173,7 +173,6 @@ def log_results_to_sheet(client, results, run_timestamp):
         naplo_sheet = spreadsheet.add_worksheet(title="Naplo", rows=1000, cols=len(headers))
         naplo_sheet.append_row(headers, value_input_option="USER_ENTERED")
 
-    # Ha üres a munkalap, fejléc beszúrása
     if len(naplo_sheet.get_all_values()) == 0:
         naplo_sheet.append_row(headers, value_input_option="USER_ENTERED")
 
@@ -207,7 +206,7 @@ def log_results_to_sheet(client, results, run_timestamp):
 
 
 def calculate_technical_indicators(hist_df):
-    """Kiszámolja a 14 napos RSI-t, valamint az 50 és 200 napos mozgóátlagot."""
+    """Kiszámolja a 14 napos RSI-t, az 50/200 napos mozgóátlagot és előkészíti a grafikon adatokat."""
     if hist_df is None or hist_df.empty or "Close" not in hist_df:
         return None
 
@@ -219,8 +218,11 @@ def calculate_technical_indicators(hist_df):
     prev_close = float(close.iloc[-2])
     change_pct = ((current_price - prev_close) / prev_close) * 100
 
-    sma_50 = float(close.rolling(window=50).mean().iloc[-1]) if len(close) >= 50 else None
-    sma_200 = float(close.rolling(window=200).mean().iloc[-1]) if len(close) >= 200 else None
+    sma_50_series = close.rolling(window=50).mean()
+    sma_200_series = close.rolling(window=200).mean()
+
+    sma_50 = float(sma_50_series.iloc[-1]) if len(close) >= 50 and pd.notna(sma_50_series.iloc[-1]) else None
+    sma_200 = float(sma_200_series.iloc[-1]) if len(close) >= 200 and pd.notna(sma_200_series.iloc[-1]) else None
 
     rsi_14 = None
     if len(close) >= 15:
@@ -246,6 +248,16 @@ def calculate_technical_indicators(hist_df):
     else:
         trend = "Nincs elegendő historikus adat a 200 napos trendhez"
 
+    # Utolsó ~1 év (252 nap) előkészítése az interaktív grafikonhoz
+    chart_df = pd.DataFrame({
+        "Árfolyam": close,
+        "SMA 200": sma_200_series,
+        "SMA 50": sma_50_series,
+    }).tail(252)
+
+    if getattr(chart_df.index, "tz", None) is not None:
+        chart_df.index = chart_df.index.tz_localize(None)
+
     return {
         "price": current_price,
         "change_pct": change_pct,
@@ -253,15 +265,16 @@ def calculate_technical_indicators(hist_df):
         "sma_50": sma_50,
         "sma_200": sma_200,
         "trend": trend,
+        "chart_df": chart_df,
     }
 
 
 def fetch_yahoo_data(ticker_symbol):
-    """Lekéri az 1 éves grafikonadatokat, indikátorokat és a friss híreket."""
+    """Lekéri a 2 éves grafikonadatokat, indikátorokat és a friss híreket."""
     ticker = yf.Ticker(ticker_symbol)
 
     try:
-        hist = ticker.history(period="1y", interval="1d")
+        hist = ticker.history(period="2y", interval="1d")
         tech_data = calculate_technical_indicators(hist)
     except Exception:
         tech_data = None
@@ -445,6 +458,15 @@ for idx, item in enumerate(data):
                 t1.metric("RSI (14)", rsi_val, rsi_delta, delta_color="off")
                 t2.metric("SMA 50", sma50_val)
                 t3.metric("SMA 200", sma200_val)
+
+                # Interaktív árfolyam- és mozgóátlag-grafikon
+                chart_df = tech.get("chart_df")
+                if chart_df is not None and not chart_df.empty:
+                    st.line_chart(
+                        chart_df,
+                        color=["#2980b9", "#8e44ad", "#f39c12"],
+                        height=230,
+                    )
 
             rec = item["recommendation"]
             badge_color = "green" if rec == "VÉTEL" else ("red" if rec == "ELADÁS" else "orange")
