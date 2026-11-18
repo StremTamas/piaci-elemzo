@@ -17,6 +17,18 @@ st.set_page_config(page_title="AI Piaci & Technikai Elemző", page_icon="📈", 
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 model = genai.GenerativeModel("gemini-2.5-flash")
 
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+def get_gspread_client():
+    """Hitelesített Google Sheets kliens létrehozása írási és olvasási jogosultsággal."""
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return gspread.authorize(creds)
+
 
 @st.cache_resource
 def get_alert_history():
@@ -58,7 +70,6 @@ def check_and_send_alert(item):
     if not triggers:
         return False, None
 
-    # Duplikációszűrés: azonos eszköz + azonos kiváltó ok 24 órán belül ne küldjön újabb levelet
     alert_key = f"{item['ticker']}_{'_'.join(triggers)}"
     history = get_alert_history()
     now = datetime.now()
@@ -123,16 +134,8 @@ def check_and_send_alert(item):
         return False, f"SMTP hiba: {e}"
 
 
-def get_active_assets_from_sheet():
-    """Beolvassa az 'IGEN' státuszú eszközöket a Google Táblázatból."""
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ]
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(creds)
-
+def get_active_assets_from_sheet(client):
+    """Beolvassa az 'IGEN' státuszú eszközöket az 'Eszkozok' munkalapról."""
     sheet = client.open_by_key(st.secrets["SHEET_ID"]).worksheet("Eszkozok")
     records = sheet.get_all_records()
 
@@ -140,6 +143,67 @@ def get_active_assets_from_sheet():
         row for row in records
         if str(row.get("aktiv", "")).strip().upper() == "IGEN" and row.get("ticker")
     ]
+
+
+def log_results_to_sheet(client, results, run_timestamp):
+    """Kötegelve menti az elemzési eredményeket a Google Táblázat 'Naplo' munkalapjára."""
+    if not results:
+        return True, "Nincs menthető adat."
+
+    spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
+    headers = [
+        "Időpont",
+        "Eszköz",
+        "Ticker",
+        "Árfolyam",
+        "Napi változás (%)",
+        "RSI (14)",
+        "SMA 50",
+        "SMA 200",
+        "AI Pontszám",
+        "Ajánlás",
+        "Technikai kép",
+        "Kockázat",
+        "AI Indoklás",
+    ]
+
+    try:
+        naplo_sheet = spreadsheet.worksheet("Naplo")
+    except gspread.WorksheetNotFound:
+        naplo_sheet = spreadsheet.add_worksheet(title="Naplo", rows=1000, cols=len(headers))
+        naplo_sheet.append_row(headers, value_input_option="USER_ENTERED")
+
+    # Ha üres a munkalap, fejléc beszúrása
+    if len(naplo_sheet.get_all_values()) == 0:
+        naplo_sheet.append_row(headers, value_input_option="USER_ENTERED")
+
+    rows_to_append = []
+    for item in results:
+        tech = item.get("tech") or {}
+        price_val = round(tech["price"], 4) if tech.get("price") is not None else ""
+        change_val = round(tech["change_pct"], 2) if tech.get("change_pct") is not None else ""
+        rsi_val = round(tech["rsi_14"], 2) if tech.get("rsi_14") is not None else ""
+        sma50_val = round(tech["sma_50"], 4) if tech.get("sma_50") is not None else ""
+        sma200_val = round(tech["sma_200"], 4) if tech.get("sma_200") is not None else ""
+
+        rows_to_append.append([
+            run_timestamp,
+            item["name"],
+            item["ticker"],
+            price_val,
+            change_val,
+            rsi_val,
+            sma50_val,
+            sma200_val,
+            item["score"],
+            item["recommendation"],
+            item["technical_state"],
+            item["risk"],
+            item["reasoning"],
+        ])
+
+    naplo_sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+    return True, f"Naplózva a 'Naplo' munkalapra ({len(rows_to_append)} sor)."
 
 
 def calculate_technical_indicators(hist_df):
@@ -269,8 +333,9 @@ def analyze_asset_with_ai(name, ticker, tech_data, news_text):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_full_analysis():
-    """Futtatja a teljes elemzést és 1 óráig gyorsítótárazza az eredményt."""
-    assets = get_active_assets_from_sheet()
+    """Futtatja a teljes elemzést, naplózza az eredményt és 1 óráig gyorsítótárazza."""
+    client = get_gspread_client()
+    assets = get_active_assets_from_sheet(client)
     results = []
 
     for asset in assets:
@@ -292,7 +357,14 @@ def run_full_analysis():
             "news": news_text,
         })
 
-    return results, datetime.now().strftime("%Y.%m.%d. %H:%M")
+    run_timestamp = datetime.now().strftime("%Y.%m.%d. %H:%M")
+
+    try:
+        log_ok, log_msg = log_results_to_sheet(client, results, run_timestamp)
+    except Exception as e:
+        log_ok, log_msg = False, f"Naplózási hiba (ellenőrizd a Szerkesztő jogosultságot): {e}"
+
+    return results, run_timestamp, log_ok, log_msg
 
 
 # --- FELÜLET (UI) ---
@@ -307,7 +379,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📧 Gmail Riasztások")
     alerts_enabled = st.toggle("Automatikus e-mail riasztás", value=True)
-    st.caption("Feltétel: **ELADÁS** ajánlás vagy **RSI 30 alatti** érték.")
+    st.caption("Feltétel: **ELADÁS** ajánlás vagy **30 alatti RSI** érték.")
 
     if st.button("Teszt e-mail küldése", use_container_width=True):
         try:
@@ -329,12 +401,16 @@ with st.sidebar:
 
 with st.spinner("Grafikonadatok, indikátorok és hírek elemzése..."):
     try:
-        data, last_updated = run_full_analysis()
+        data, last_updated, log_ok, log_msg = run_full_analysis()
     except Exception as e:
         st.error(f"Hiba a Google Táblázat elérésekor: {e}")
         st.stop()
 
 st.caption(f"Utolsó frissítés ideje: **{last_updated}**")
+if log_ok:
+    st.caption(f"💾 {log_msg}")
+else:
+    st.warning(f"⚠️ {log_msg}")
 
 if not data:
     st.warning("Nincs 'IGEN' státuszú eszköz a Google Táblázatban.")
