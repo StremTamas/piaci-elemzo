@@ -2,6 +2,6 @@ streamlit
 gspread
 google-auth
 yfinance
-google-generativeai
+google-genai
 pandas
 feedparser
