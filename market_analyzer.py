@@ -139,6 +139,12 @@ st.markdown(
         margin-bottom: 10px;
     }
 
+    .legend-bar {
+        font-size: 0.78rem;
+        opacity: 0.85;
+        margin: -6px 0 10px 0;
+    }
+
     div.stButton > button {
         background-color: #FF6B00 !important;
         color: #FFFFFF !important;
@@ -157,9 +163,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Gemini API inicializálása
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-2.5-flash")
+
+def get_clean_gemini_key():
+    """Kinyeri és megtisztítja a Gemini API kulcsot a felesleges szóközöktől/idézőjelektől."""
+    raw_key = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY") or ""
+    return str(raw_key).strip().strip('"').strip("'")
+
+
+GEMINI_API_KEY = get_clean_gemini_key()
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-2.5-flash")
+else:
+    model = None
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -201,6 +217,9 @@ def send_gmail_alert(subject, plain_body, html_body):
 
 def check_and_send_alert(item):
     """Riasztást küld, ha KITÁRAZÁS javasolt vagy az RSI 30 alatti."""
+    if item.get("ai_error"):
+        return False, None
+
     existing_act = item.get("existing_action", "").upper()
     tech = item.get("tech") or {}
     rsi = tech.get("rsi_14")
@@ -367,9 +386,10 @@ def get_vig_funds_from_sheet(client):
 
 
 def log_results_to_sheet(client, results, run_timestamp):
-    """Kötegelve menti az elemzési eredményeket a Google Táblázat 'Naplo' munkalapjára."""
-    if not results:
-        return True, "Nincs menthető adat."
+    """Kötegelve menti a sikeres elemzési eredményeket a Google Táblázat 'Naplo' munkalapjára."""
+    valid_results = [r for r in results if not r.get("ai_error")]
+    if not valid_results:
+        return False, "API kulcs hiba miatt a naplózás kihagyva."
 
     spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
     headers = [
@@ -398,7 +418,7 @@ def log_results_to_sheet(client, results, run_timestamp):
         naplo_sheet.append_row(headers, value_input_option="USER_ENTERED")
 
     rows_to_append = []
-    for item in results:
+    for item in valid_results:
         tech = item.get("tech") or {}
         price_val = round(tech["price"], 4) if tech.get("price") is not None else ""
         change_val = round(tech["change_pct"], 2) if tech.get("change_pct") is not None else ""
@@ -562,6 +582,17 @@ def fetch_yahoo_data(ticker_symbol, asset_name):
 
 def analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, asset_currency="N/A"):
     """Kombinált portfólió-döntéstámogatás EUR/HUF devizahatással és magyar hírfordítással."""
+    if model is None:
+        return {
+            "existing_portfolio_action": "TARTÁS",
+            "new_entry_action": "KIVÁRÁS",
+            "plain_tech_summary": "Hiányzó Gemini API kulcs.",
+            "sentiment_score": 50,
+            "reasoning": "A Streamlit Secrets beállításokból hiányzik a GEMINI_API_KEY.",
+            "translated_news": [],
+            "ai_error": True,
+        }
+
     if tech_data:
         rsi_str = f"{tech_data['rsi_14']:.1f}" if tech_data["rsi_14"] is not None else "N/A"
         sma50_str = f"{tech_data['sma_50']:,.4f}" if tech_data["sma_50"] is not None else "N/A"
@@ -599,31 +630,34 @@ def analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, asset
     {news_block}
 
     Feladat:
-    1. A technikai adatok, a hírek és a forintárfolyam-hatás alapján dönts külön a MEGLÉVŐ portfólióban lévő pozícióról, és külön az ÚJ vásárlásról.
-    2. Fordítsd le magyarra a fenti hírek címeit.
+1. A technikai adatok, a hírek és a forintárfolyam-hatás alapján dönts külön a MEGLÉVŐ portfólióban lévő pozícióról, és külön az ÚJ vásárlásról.
+2. Fordítsd le magyarra a fenti hírek címeit.
 
     Válaszolj KIZÁRÓLAG érvényes JSON formátumban, pontosan ezekkel a kulcsokkal:
-    - "existing_portfolio_action": pontosan az egyik érték ezek közül:
+- "existing_portfolio_action": pontosan az egyik érték ezek közül:
       "TARTÁS", "HÍGÍTÁS (DCA)", "RÉSZLEGES KITÁRAZÁS", "TELJES KITÁRAZÁS".
-    - "new_entry_action": pontosan az egyik érték ezek közül:
+- "new_entry_action": pontosan az egyik érték ezek közül:
       "ÉRDEMES VENNI", "KIVÁRÁS", "KERÜLENDŐ".
-    - "plain_tech_summary": 1 rövid, közérthető magyar mondat szakszavak (RSI/SMA) nélkül arról, hol áll most az árfolyam.
-    - "sentiment_score": egész szám 1 és 100 között.
-    - "reasoning": maximum 2-3 tömör, lényegre törő magyar mondat arról, miért ezt javaslod most (ha releváns, térj ki a forintárfolyam hatására is).
-    - "translated_news": lista, amely a kapott hírek magyarra fordított címeit tartalmazza ugyanolyan sorrendben. Ha nem volt hír, üres lista [].
+- "plain_tech_summary": 1 rövid, közérthető magyar mondat szakszavak (RSI/SMA) nélkül arról, hol áll most az árfolyam.
+- "sentiment_score": egész szám 1 és 100 között.
+- "reasoning": maximum 2-3 tömör, lényegre törő magyar mondat arról, miért ezt javaslod most (ha releváns, térj ki a forintárfolyam hatására is).
+- "translated_news": lista, amely a kapott hírek magyarra fordított címeit tartalmazza ugyanolyan sorrendben. Ha nem volt hír, üres lista [].
     """
     try:
         response = model.generate_content(prompt)
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_json)
+        parsed = json.loads(clean_json)
+        parsed["ai_error"] = False
+        return parsed
     except Exception as e:
         return {
             "existing_portfolio_action": "TARTÁS",
             "new_entry_action": "KIVÁRÁS",
-            "plain_tech_summary": "Technikai összesítő átmenetileg nem elérhető.",
+            "plain_tech_summary": "AI elemzés átmenetileg nem elérhető.",
             "sentiment_score": 50,
             "reasoning": f"Elemzési hiba: {str(e)}",
             "translated_news": [],
+            "ai_error": True,
         }
 
 
@@ -656,15 +690,118 @@ def format_price(val):
     return f"{val:,.4f}" if val < 10 else f"{val:,.2f}"
 
 
+def render_technical_learning_panel(tech):
+    """Látható SMA 50 / SMA 200 / RSI értékelő és szabályalapú tanuló magyarázat."""
+    if not tech:
+        return
+
+    price = tech.get("price")
+    sma50 = tech.get("sma_50")
+    sma200 = tech.get("sma_200")
+    rsi = tech.get("rsi_14")
+
+    st.markdown("##### 📐 Technikai mutatók és döntési logika (Tanuló nézet)")
+
+    t1, t2, t3 = st.columns(3)
+
+    # SMA 50 kártya + eltérés
+    if sma50 is not None and price is not None:
+        diff50 = ((price - sma50) / sma50) * 100
+        t1.metric("SMA 50 (középtáv)", format_price(sma50), f"{diff50:+.1f}% az árhoz képest")
+    else:
+        t1.metric("SMA 50 (középtáv)", "N/A", "Kevés adat (<50 nap)")
+
+    # SMA 200 kártya + eltérés
+    if sma200 is not None and price is not None:
+        diff200 = ((price - sma200) / sma200) * 100
+        t2.metric("SMA 200 (hosszú táv)", format_price(sma200), f"{diff200:+.1f}% az árhoz képest")
+    else:
+        t2.metric("SMA 200 (hosszú táv)", "N/A", "Kevés adat (<200 nap)")
+
+    # RSI 14 kártya + zóna
+    if rsi is not None:
+        if rsi < 30:
+            rsi_zone = "Túladott (<30) • Hígítási zóna"
+        elif rsi > 70:
+            rsi_zone = "Túlvett (>70) • Túlfűtött"
+        else:
+            rsi_zone = "Semleges zóna (30–70)"
+        t3.metric("RSI (14 napos)", f"{rsi:.1f}", rsi_zone)
+    else:
+        t3.metric("RSI (14 napos)", "N/A", "Kevés adat (<15 nap)")
+
+    # Szabályalapú indoklás összeállítása az aktuális értékekre
+    rules_notes = []
+
+    if price is not None and sma50 is not None and sma200 is not None:
+        if price > sma50 and sma50 > sma200:
+            rules_notes.append(
+                "✅ **Trend (SMA 50 / SMA 200):** Az árfolyam az SMA 50 felett, az SMA 50 pedig az SMA 200 felett halad (erős emelkedő trend / Aranykereszt) → **Meglévő pozíció: TARTÁS**."
+            )
+        elif price < sma50 and sma50 < sma200:
+            rules_notes.append(
+                "🔴 **Trend (SMA 50 / SMA 200):** Az árfolyam mindkét mozgóátlag alatt van, és az SMA 50 az SMA 200 alá esett (tartós csökkenő trend) → **Meglévő pozíció: KITÁRAZÁS / KOCKÁZATCSÖKKENTÉS**, új vétel: **KERÜLENDŐ**."
+            )
+        elif price < sma50 and price >= sma200:
+            rules_notes.append(
+                "⚖️ **Trend (SMA 50 / SMA 200):** Az árfolyam beesett az SMA 50 alá, de az SMA 200 még tartja (átmeneti korrekció emelkedő főtrendben) → **Meglévő pozíció: TARTÁS**, új vétel: **KIVÁRÁS** (támasz teszteléséig)."
+            )
+        else:
+            rules_notes.append(
+                "🟡 **Trend (SMA 50 / SMA 200):** Az árfolyam az SMA 200 közelében/alatt billeg, iránykeresés zajlik → **KIVÁRÁS** a trend megerősítéséig."
+            )
+    elif price is not None and sma50 is not None:
+        if price >= sma50:
+            rules_notes.append("✅ **Középtávú trend:** Az árfolyam az SMA 50 felett van → **TARTÁS**.")
+        else:
+            rules_notes.append("⚠️ **Középtávú trend:** Az árfolyam az SMA 50 alatt van → **KIVÁRÁS**.")
+
+    if rsi is not None:
+        if rsi < 30:
+            rules_notes.append(
+                f"🟢 **Lendület (RSI = {rsi:.1f}):** 30 alatti túladott zóna – statisztikailag gyakori a felpattanás → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI** (ha a főtrend nem omlott össze)."
+            )
+        elif rsi > 70:
+            rules_notes.append(
+                f"🟠 **Lendület (RSI = {rsi:.1f}):** 70 feletti túlvett zóna – rövid távon kifulladhat az emelkedés → **Új vétel: KIVÁRÁS**, meglévőnél **RÉSZLEGES KITÁRAZÁS** mérlegelhető."
+            )
+        else:
+            rules_notes.append(
+                f"🔵 **Lendület (RSI = {rsi:.1f}):** 30 és 70 közötti egészséges, kiegyensúlyozott tartomány → Nincs extrém beszállási vagy kiszállási kényszer (**TARTÁS / KIVÁRÁS**)."
+            )
+
+    if rules_notes:
+        st.info("\n\n".join(rules_notes))
+
+    with st.expander("📘 Gyors szabály-puska: Mikor mi a jelzés?"):
+        st.markdown(
+            """
+            * **TARTÁS:** Az árfolyam az **SMA 50** és az **SMA 200** felett halad, az RSI pedig **30–70** között mozog.
+            * **HÍGÍTÁS (DCA) / ÉRDEMES VENNI:** Az **RSI 30 alá** esik (túladott pánikzóna), vagy az árfolyam emelkedő főtrendben visszateszteli az **SMA 200** támaszt.
+            * **KIVÁRÁS:** Az árfolyam az SMA 50 és SMA 200 között oldalazik, vagy az **RSI 65–70 felett** van (túl drága az új beszálláshoz).
+            * **RÉSZLEGES / TELJES KITÁRAZÁS:** Az árfolyam tartósan az **SMA 200 alá** esik (trendtörés), vagy kiugró **RSI (>75)** mellett gyenge a forint (devizás eszközöknél).
+            """
+        )
+
+
 def render_asset_details(item):
-    """Megjeleníti egy eszköz grafikonját, magyar híreit és technikai mutatóit."""
+    """Megjeleníti egy eszköz grafikonját, a tanuló SMA/RSI értékelőt és a magyar híreket."""
     tech = item["tech"]
     if tech and tech.get("chart_df") is not None and len(tech["chart_df"]) >= 2:
         st.line_chart(
             tech["chart_df"],
             color=["#FF6B00", "#0EA5E9", "#64748B"],
-            height=200,
+            height=210,
         )
+        st.markdown(
+            '<div class="legend-bar">📈 <strong>Grafikon:</strong> '
+            '<span style="color:#FF6B00;font-weight:700;">● Árfolyam</span> &nbsp;|&nbsp; '
+            '<span style="color:#64748B;font-weight:700;">● SMA 50 (50 napos átlag)</span> &nbsp;|&nbsp; '
+            '<span style="color:#0EA5E9;font-weight:700;">● SMA 200 (200 napos átlag)</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    render_technical_learning_panel(tech)
 
     with st.expander("📰 Elemzett hírek (magyarra fordítva)"):
         if item["news_list"]:
@@ -675,13 +812,6 @@ def render_asset_details(item):
                     st.markdown(f"- {n['hu_title']} *({n['publisher']})*")
         else:
             st.write("Nincsenek friss hírek az elmúlt napokból.")
-
-    if tech:
-        with st.expander("📐 Részletes technikai mutatók (RSI, mozgóátlagok)"):
-            t1, t2, t3 = st.columns(3)
-            t1.metric("RSI (14)", f"{tech['rsi_14']:.1f}" if tech["rsi_14"] is not None else "N/A")
-            t2.metric("SMA 50", f"{tech['sma_50']:,.2f}" if tech["sma_50"] is not None else "N/A")
-            t3.metric("SMA 200", f"{tech['sma_200']:,.2f}" if tech["sma_200"] is not None else "N/A")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -722,6 +852,7 @@ def run_full_analysis():
             "score": ai_res.get("sentiment_score", 50),
             "reasoning": ai_res.get("reasoning", ""),
             "news_list": paired_news,
+            "ai_error": ai_res.get("ai_error", False),
         })
 
     # 2. VIG Alapkezelő alapok (a 'VIG_Alapok' munkalapról)
@@ -758,6 +889,7 @@ def run_full_analysis():
                 "score": ai_res.get("sentiment_score", 50),
                 "reasoning": ai_res.get("reasoning", ""),
                 "news_list": paired_news,
+                "ai_error": ai_res.get("ai_error", False),
             })
 
     run_timestamp = datetime.now().strftime("%Y.%m.%d. %H:%M")
@@ -809,6 +941,15 @@ with st.spinner("Piaci adatok, forintárfolyam és VIG alapok elemzése..."):
     except Exception as e:
         st.error(f"Hiba a Google Táblázat elérésekor: {e}")
         st.stop()
+
+# Ha az AI API kulcs hibás volt, azonnal jelezzük és töröljük a hibás cache-t
+if any(item.get("ai_error") for item in data):
+    st.error(
+        "⚠️ **Gemini API kulcs hiba (`API_KEY_INVALID`):** A piaci adatok és az SMA/RSI számítások betöltöttek, "
+        "de a szöveges AI-elemzéshez ellenőrizd a Streamlit Cloud **Settings → Secrets** alatt a "
+        '`GEMINI_API_KEY = "AIzaSy..."` sort (felesleges szóközök és dupla idézőjelek nélkül), majd nyomj a bal oldali **Frissítés most** gombra.'
+    )
+    st.cache_data.clear()
 
 if fx_context:
     st.markdown(f'<div class="fx-strip">💱 {fx_context["summary"]}</div>', unsafe_allow_html=True)
@@ -892,7 +1033,7 @@ if view_mode == "📋 Listás nézet":
     # Kártyaváltás nélküli gyors részletnéző egy kiválasztott eszközhöz
     st.markdown("---")
     selected_label = st.selectbox(
-        "🔎 Grafikon és magyarított hírek megtekintése ehhez az eszközhöz:",
+        "🔎 Grafikon, SMA/RSI értékelő és magyarított hírek megtekintése ehhez az eszközhöz:",
         [f"{item['name']} ({item['ticker']})" for item in filtered_data],
     )
     selected_item = next(
