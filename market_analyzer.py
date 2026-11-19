@@ -5,6 +5,7 @@ import yfinance as yf
 from google import genai
 import pandas as pd
 import json
+import time
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -179,7 +180,7 @@ SCOPES = [
 
 
 def call_gemini_api(prompt):
-    """Meghívja a Gemini 2.5 Flash modellt, automatikusan kezelve az AQ. és az AIza kulcstípusokat is."""
+    """Meghívja a Gemini 3.8 Flash modellt, automatikus 429-es kvótavárakozással."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
@@ -188,23 +189,30 @@ def call_gemini_api(prompt):
     last_err = None
 
     for use_vertex in modes_to_try:
-        try:
-            if use_vertex:
-                client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
-            else:
-                client = genai.Client(api_key=GEMINI_API_KEY)
+        for attempt in range(3):
+            try:
+                if use_vertex:
+                    client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
+                else:
+                    client = genai.Client(api_key=GEMINI_API_KEY)
 
-            response = client.models.generate_content(
-    model="gemini-3.8-flash",
-    contents=prompt,
-)
-            return response.text or ""
-        except Exception as e:
-            last_err = e
-            err_upper = str(e).upper()
-            if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404"]):
-                continue
-            raise e
+                response = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=prompt,
+                )
+                return response.text or ""
+            except Exception as e:
+                last_err = e
+                err_upper = str(e).upper()
+                # Percenkénti 5 kéréses Free Tier limit elérésekor várunk és újrapróbáljuk
+                if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
+                    if attempt < 2:
+                        time.sleep(16)
+                        continue
+                    raise e
+                if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403"]):
+                    break
+                raise e
 
     raise last_err
 
@@ -830,12 +838,13 @@ def render_asset_details(item):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_full_analysis():
-    """Futtatja a teljes elemzést (részvények, ETF-ek, kripto + VIG alapok + EUR/HUF)."""
+    """Futtatja a teljes elemzést kvótaütemezéssel (5 kérés/perc Free Tier limithez igazítva)."""
     client = get_gspread_client()
     fx_context = fetch_eurhuf_context()
     assets = get_active_assets_from_sheet(client)
     vig_funds = get_vig_funds_from_sheet(client)
     results = []
+    api_calls_made = 0
 
     # 1. Tőzsdei eszközök (Yahoo Finance)
     for asset in assets:
@@ -844,7 +853,11 @@ def run_full_analysis():
         currency = infer_currency_from_ticker(ticker)
 
         tech_data, news_items = fetch_yahoo_data(ticker, name)
+
+        if api_calls_made > 0:
+            time.sleep(12.5)
         ai_res = analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, currency)
+        api_calls_made += 1
 
         translated_titles = ai_res.get("translated_news", [])
         paired_news = []
@@ -875,6 +888,9 @@ def run_full_analysis():
         vig_news = search_news_fallback("VIG Asset Management")
         for fund in vig_funds:
             tech_data = calculate_technical_indicators(fund["hist_df"])
+
+            if api_calls_made > 0:
+                time.sleep(12.5)
             ai_res = analyze_asset_with_ai(
                 fund["name"],
                 fund["ticker"],
@@ -883,6 +899,7 @@ def run_full_analysis():
                 fx_context,
                 fund["currency"],
             )
+            api_calls_made += 1
 
             translated_titles = ai_res.get("translated_news", [])
             paired_news = []
@@ -951,7 +968,7 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Hiba a küldéskor: {e}")
 
-with st.spinner("Piaci adatok, forintárfolyam és VIG alapok elemzése..."):
+with st.spinner("Piaci adatok, forintárfolyam és VIG alapok elemzése (ingyenes API kvóta miatt ~12 mp/eszköz)..."):
     try:
         data, fx_context, last_updated, log_ok, log_msg = run_full_analysis()
     except Exception as e:
