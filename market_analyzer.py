@@ -55,8 +55,9 @@ st.markdown(
         padding: 10px 14px;
         border-radius: 6px;
         margin-bottom: 14px;
-        font-size: 0.9rem;
+        font-size: 0.88rem;
         font-weight: 600;
+        line-height: 1.45;
     }
 
     .asset-header {
@@ -217,6 +218,7 @@ def call_gemini_single_batch(prompt):
 
     raise last_err
 
+
 def get_gspread_client():
     """Hitelesített Google Sheets kliens létrehozása."""
     creds_dict = dict(st.secrets["gcp_service_account"])
@@ -250,16 +252,18 @@ def send_gmail_alert(subject, plain_body, html_body):
 
 
 def check_and_send_alert(item):
-    """Riasztást küld, ha KITÁRAZÁS javasolt vagy az RSI 30 alatti."""
+    """Riasztást küld, ha KITÁRAZÁS vagy HÍGÍTÁS / ÉRDEMES VENNI jelzés alakul ki."""
     existing_act = item.get("existing_action", "").upper()
+    new_act = item.get("new_entry_action", "").upper()
     tech = item.get("tech") or {}
     rsi = tech.get("rsi_14")
 
     triggers = []
     if "KITÁRAZÁS" in existing_act:
         triggers.append(f"Portfólió jelzés: {item['existing_action']}")
-    if rsi is not None and rsi < 30:
-        triggers.append(f"Túladott zóna – Hígítási/beszállási esély (RSI: {rsi:.1f})")
+    if "ÉRDEMES VENNI" in new_act or "HÍGÍTÁS" in existing_act:
+        rsi_txt = f" (RSI: {rsi:.1f})" if rsi is not None else ""
+        triggers.append(f"Kedvező beszállási / hígítási zóna{rsi_txt}")
 
     if not triggers:
         return False, None
@@ -321,10 +325,10 @@ def check_and_send_alert(item):
         return False, f"SMTP hiba: {e}"
 
 
-def fetch_eurhuf_context():
-    """Lekéri az EUR/HUF árfolyamhelyzetet a devizás profitrealizálás időzítéséhez."""
+def _fetch_single_fx_pair(ticker_symbol, pair_label):
+    """Lekéri egy konkrét devizapár (pl. EUR/HUF vagy USD/HUF) 1 éves pozícióját."""
     try:
-        hist = yf.Ticker("EURHUF=X").history(period="1y", interval="1d", timeout=10)
+        hist = yf.Ticker(ticker_symbol).history(period="1y", interval="1d", timeout=10)
         if hist is None or hist.empty or "Close" not in hist:
             return None
 
@@ -341,21 +345,35 @@ def fetch_eurhuf_context():
         pos_pct = ((rate - low_1y) / (high_1y - low_1y) * 100) if high_1y > low_1y else 50.0
 
         if pos_pct >= 75:
-            regime = "Gyenge forint zóna (éves csúcs közelében – devizás profitrealizálásra kedvező)"
+            regime_short = "Gyenge HUF zóna (éves csúcs közelében – profitrealizálásra kedvező)"
+            zone_tag = "WEAK_HUF"
         elif pos_pct <= 25:
-            regime = "Erős forint zóna (éves mélypont közelében – devizás vételre kedvező)"
+            regime_short = "Erős HUF zóna (éves mélypont közelében – devizaváltásra kedvező)"
+            zone_tag = "STRONG_HUF"
         else:
-            regime = "Középmezőnyben mozgó forintárfolyam"
+            regime_short = "Középmezőnyben mozgó forintárfolyam"
+            zone_tag = "NEUTRAL_HUF"
 
         return {
+            "pair": pair_label,
             "rate": rate,
             "change_pct": chg,
             "sma50": sma50,
             "pos_pct": pos_pct,
-            "summary": f"EUR/HUF: {rate:.2f} Ft ({chg:+.2f}%) | 50 napos átlag: {sma50:.2f} Ft | {regime}",
+            "zone_tag": zone_tag,
+            "regime_short": regime_short,
+            "summary": f"{pair_label}: {rate:.2f} Ft ({chg:+.2f}%) | 50n átlag: {sma50:.2f} Ft | {regime_short}",
         }
     except Exception:
         return None
+
+
+def fetch_fx_context():
+    """Külön-külön lekéri az EUR/HUF és az USD/HUF devizakörnyezetet."""
+    return {
+        "EUR": _fetch_single_fx_pair("EURHUF=X", "EUR/HUF"),
+        "USD": _fetch_single_fx_pair("USDHUF=X", "USD/HUF"),
+    }
 
 
 def get_active_assets_from_sheet(client):
@@ -512,9 +530,11 @@ def calculate_technical_indicators(hist_df):
 
     if sma_50 and sma_200:
         if current_price > sma_50 > sma_200:
-            trend = "Erős emelkedő trendben mozog"
+            trend = "Erős emelkedő trend (SMA 50 és SMA 200 felett)"
         elif current_price < sma_50 < sma_200:
-            trend = "Tartós csökkenő trendben mozog"
+            trend = "Tartós csökkenő trend (mindkét mozgóátlag alatt)"
+        elif current_price < sma_200:
+            trend = "Megtört főtrend (az SMA 200 alá esett)"
         elif sma_50 > sma_200:
             trend = "Emelkedő főtrend, átmeneti visszahúzódással"
         else:
@@ -543,6 +563,194 @@ def calculate_technical_indicators(hist_df):
         "sma_200": sma_200,
         "trend": trend,
         "chart_df": chart_df,
+    }
+
+
+def evaluate_technical_matrix(tech, currency="USD", fx_map=None):
+    """
+    EGYSÉGES DÖNTÉSI MÁTRIX (Trend × RSI × Saját Devizapár):
+    Minden eszközt a saját devizaneméhez tartozó forintárfolyam (EUR/HUF vagy USD/HUF) alapján finomhangol.
+    """
+    fx_map = fx_map or {}
+    relevant_fx = fx_map.get(currency) if currency in ("EUR", "USD") else None
+    zone_tag = relevant_fx.get("zone_tag") if relevant_fx else None
+    weak_huf = zone_tag == "WEAK_HUF"
+    strong_huf = zone_tag == "STRONG_HUF"
+
+    if relevant_fx:
+        fx_note = (
+            f"💱 **Devizahatás ({relevant_fx['pair']} = {relevant_fx['rate']:.2f} Ft):** "
+            f"{relevant_fx['regime_short']} (1 éves sáv {relevant_fx['pos_pct']:.0f}%-ánál)."
+        )
+    elif currency == "HUF":
+        fx_note = "💱 **Devizahatás (HUF):** Forintos eszköz, devizaváltási árfolyamhatás nem érinti."
+    else:
+        fx_note = f"💱 **Devizahatás ({currency}):** Nincs külön devizapár-korrekció."
+
+    if not tech:
+        return {
+            "existing_action": "TARTÁS",
+            "new_entry_action": "KIVÁRÁS",
+            "score": 50,
+            "plain_summary": "Nincs elegendő historikus árfolyamadat.",
+            "reasoning": "Nincs elegendő historikus árfolyamadat az értékeléshez.",
+            "trend_note": "Nincs elegendő adat a trend megállapításához.",
+            "rsi_note": "Nincs elegendő adat az RSI kiszámításához.",
+            "fx_note": fx_note,
+            "matrix_rule_note": "Adathiány miatt alapértelmezett kivárás.",
+            "rsi_badge": "Nincs adat",
+        }
+
+    price = tech.get("price")
+    sma50 = tech.get("sma_50")
+    sma200 = tech.get("sma_200")
+    rsi = tech.get("rsi_14")
+
+    # 1. Hosszú/középtávú trend besorolása (SMA 50 & SMA 200)
+    if price is not None and sma50 is not None and sma200 is not None:
+        if price > sma50 and sma50 > sma200:
+            trend_state = "UP_STRONG"
+            trend_note = "✅ **Hosszú/középtávú trend (SMA 50 & 200):** Az árfolyam mindkét mozgóátlag felett van (`Ár > SMA 50 > SMA 200`), az emelkedő főtrend ép."
+        elif price >= sma200:
+            trend_state = "UP_PULLBACK"
+            trend_note = "⚖️ **Hosszú/középtávú trend (SMA 50 & 200):** Az árfolyam az SMA 50 alá korrigált, de az SMA 200 még tartja (`SMA 200 ≤ Ár ≤ SMA 50`)."
+        elif sma50 < sma200:
+            trend_state = "DOWN_CONFIRMED"
+            trend_note = "🔴 **Hosszú/középtávú trend (SMA 50 & 200):** Az árfolyam mindkét mozgóátlag alatt van, és az SMA 50 is az SMA 200 alá bukott (`Ár < SMA 50 < SMA 200`)."
+        else:
+            trend_state = "DOWN_BROKEN"
+            trend_note = "🟠 **Hosszú/középtávú trend (SMA 50 & 200):** Az árfolyam letörte a 200 napos átlagot (`Ár < SMA 200`), a hosszú távú emelkedő trend megtört."
+    elif price is not None and sma50 is not None:
+        if price >= sma50:
+            trend_state = "UP_STRONG"
+            trend_note = "✅ **Középtávú trend (SMA 50):** Az árfolyam az 50 napos átlag felett mozog."
+        else:
+            trend_state = "DOWN_BROKEN"
+            trend_note = "🟠 **Középtávú trend (SMA 50):** Az árfolyam az 50 napos átlag alá esett."
+    else:
+        trend_state = "NEUTRAL"
+        trend_note = f"ℹ️ **Trend:** {tech.get('trend', 'Kevés historikus adat')}."
+
+    # 2. Rövid távú lendület besorolása (RSI 14)
+    if rsi is None:
+        rsi_state = "UNKNOWN"
+        rsi_badge = "Nincs adat"
+        rsi_note = "ℹ️ **Rövid távú lendület (RSI 14):** Kevés adat a számításhoz."
+    elif rsi < 30:
+        rsi_state = "OVERSOLD_DEEP"
+        rsi_badge = "Mélyen túladott (<30)"
+        rsi_note = f"🟢 **Rövid távú lendület (RSI = {rsi:.1f}):** 30 alatti mélyen túladott zóna – rövid távon kimerülőben az eladói nyomás, statisztikailag gyakori a technikai felpattanás."
+    elif rsi < 35:
+        rsi_state = "OVERSOLD_NEAR"
+        rsi_badge = "Túladott közeli (30–35)"
+        rsi_note = f"🟢 **Rövid távú lendület (RSI = {rsi:.1f}):** 30–35 közötti túladott-közeli zóna – már olcsó tartomány, érdemes figyelni a fordulós gyertyákat."
+    elif rsi > 70:
+        rsi_state = "OVERBOUGHT"
+        rsi_badge = "Túlvett (>70)"
+        rsi_note = f"🟠 **Rövid távú lendület (RSI = {rsi:.1f}):** 70 feletti túlvett zóna – rövid távon túlhevült az emelkedés, nő a visszahúzódás esélye."
+    elif rsi > 65:
+        rsi_state = "ELEVATED"
+        rsi_badge = "Emelkedett (65–70)"
+        rsi_note = f"🟡 **Rövid távú lendület (RSI = {rsi:.1f}):** 65–70 közötti magasabb tartomány – erős lendület, de új beszállásra már nem olcsó."
+    else:
+        rsi_state = "NEUTRAL"
+        rsi_badge = "Semleges (35–65)"
+        rsi_note = f"🔵 **Rövid távú lendület (RSI = {rsi:.1f}):** 35 és 65 közötti kiegyensúlyozott tartomány."
+
+    # 3. Kombinált mátrix döntés (Trend × RSI × Saját Devizapár)
+    if trend_state in ("UP_STRONG", "UP_PULLBACK"):
+        if rsi_state in ("OVERSOLD_DEEP", "OVERSOLD_NEAR"):
+            existing_act = "HÍGÍTÁS (DCA)"
+            new_act = "ÉRDEMES VENNI"
+            score = 84 if strong_huf else 78
+            if strong_huf and relevant_fx:
+                fx_extra = f" Ráadásul az {relevant_fx['pair']} ({relevant_fx['rate']:.2f} Ft) erős forint zónában jár, így a devizaváltás is kedvező."
+            elif weak_huf and relevant_fx:
+                fx_extra = f" Megjegyzés: az {relevant_fx['pair']} ({relevant_fx['rate']:.2f} Ft) gyenge forint zónában van, így forintból váltva drágább a deviza."
+            else:
+                fx_extra = ""
+            reason = (
+                f"Emelkedő főtrendben (SMA 200 felett) rövid távon túladott zónába ({rsi:.1f}) esett az RSI: "
+                f"kedvező beszállási és hígítási lehetőség.{fx_extra}"
+            )
+            matrix_note = "🎯 **Kombinált döntés (Emelkedő trend + Alacsony RSI):** Meglévő pozícióra **HÍGÍTÁS (DCA)**, új vételre **ÉRDEMES VENNI**."
+        elif rsi_state == "OVERBOUGHT":
+            if weak_huf and relevant_fx:
+                existing_act = "RÉSZLEGES KITÁRAZÁS"
+                reason = (
+                    f"Túlvett RSI ({rsi:.1f}) mellett az {relevant_fx['pair']} ({relevant_fx['rate']:.2f} Ft) gyenge forint zónában (éves csúcs közelében) jár: "
+                    "kedvező alkalom részleges profitrealizálásra forintra, új vétellel kivárni."
+                )
+            else:
+                existing_act = "TARTÁS"
+                reason = (
+                    f"Az emelkedő trend ép, de a 14 napos RSI ({rsi:.1f}) már túlvett zónában van: "
+                    "meglévő pozíciót érdemes tartani, új vétellel megvárni egy visszahúzódást."
+                )
+            new_act = "KIVÁRÁS"
+            score = 62
+            matrix_note = f"🎯 **Kombinált döntés (Emelkedő trend + Túlvett RSI):** Meglévő pozícióra **{existing_act}**, új vételre **KIVÁRÁS**."
+        else:
+            existing_act = "TARTÁS"
+            new_act = "KIVÁRÁS"
+            score = 68 if trend_state == "UP_STRONG" else 58
+            if strong_huf and relevant_fx:
+                fx_extra = f" (Az erős forint miatt {relevant_fx['pair']} devizát előre váltani kedvező, de a részvényvétellel érdemes támaszra várni.)"
+            else:
+                fx_extra = ""
+            reason = (
+                "Az emelkedő főtrend ép és az RSI semleges tartományban mozog: "
+                f"meglévő pozíciót érdemes tartani, új vásárlással pedig egy támasz tesztelésére várni.{fx_extra}"
+            )
+            matrix_note = "🎯 **Kombinált döntés (Emelkedő trend + Semleges RSI):** Meglévő pozícióra **TARTÁS**, új vételre **KIVÁRÁS**."
+
+    elif trend_state in ("DOWN_BROKEN", "DOWN_CONFIRMED"):
+        if rsi_state in ("OVERSOLD_DEEP", "OVERSOLD_NEAR"):
+            existing_act = "TARTÁS"
+            new_act = "KIVÁRÁS"
+            score = 42
+            reason = (
+                f"Bár a rövid távú RSI ({rsi:.1f}) már túladott (eladni a pánik alján már késő, jöhet felpattanás), "
+                "az árfolyam az SMA 200 alatt van: új vétellel a hulló kés miatt ki kell várni az RSI 35 fölé fordulását."
+            )
+            matrix_note = "🎯 **Kombinált döntés (SMA 200 alatt + Alacsony RSI = Hulló kés):** Pánikból eladni már késő (**Meglévő: TARTÁS**), de új pénzzel meg kell várni az RSI 35 fölé fordulását (**Új vétel: KIVÁRÁS**)."
+        else:
+            if trend_state == "DOWN_CONFIRMED":
+                existing_act = "RÉSZLEGES KITÁRAZÁS"
+                new_act = "KERÜLENDŐ"
+                score = 28
+                reason = (
+                    "Tartós csökkenő trend (SMA 50 és SMA 200 alatt) mellett az RSI már nem túladott: "
+                    "az új vétel kerülendő, meglévő pozíciónál kockázatcsökkentés mérlegelendő."
+                )
+                matrix_note = "🎯 **Kombinált döntés (Tartós eső trend + Nem túladott RSI):** Meglévő pozícióra **RÉSZLEGES KITÁRAZÁS**, új vétel **KERÜLENDŐ**."
+            else:
+                existing_act = "TARTÁS"
+                new_act = "KIVÁRÁS"
+                score = 40
+                reason = (
+                    "Az árfolyam az SMA 200 alá esett és iránykeresés zajlik: "
+                    "új vásárlással ki kell várni a stabil támasz kialakulását."
+                )
+                matrix_note = "🎯 **Kombinált döntés (SMA 200 alatt + Semleges RSI):** Meglévő pozícióra **TARTÁS**, új vételre **KIVÁRÁS**."
+    else:
+        existing_act = "TARTÁS"
+        new_act = "KIVÁRÁS"
+        score = 50
+        reason = tech.get("trend", "Vegyes technikai kép, kivárás javasolt.")
+        matrix_note = "🎯 **Kombinált döntés:** Meglévő pozícióra **TARTÁS**, új vételre **KIVÁRÁS**."
+
+    return {
+        "existing_action": existing_act,
+        "new_entry_action": new_act,
+        "score": score,
+        "plain_summary": tech.get("trend", ""),
+        "reasoning": reason,
+        "trend_note": trend_note,
+        "rsi_note": rsi_note,
+        "fx_note": fx_note,
+        "matrix_rule_note": matrix_note,
+        "rsi_badge": rsi_badge,
     }
 
 
@@ -610,70 +818,10 @@ def fetch_yahoo_data(ticker_symbol, asset_name):
     return tech_data, news_items
 
 
-def generate_rule_based_fallback(tech_data, currency, fx_context, reason_prefix=""):
-    """Szabályalapú döntés és magyar összefoglaló, ha az AI kvóta átmenetileg kimerült."""
-    if not tech_data:
-        return {
-            "existing_portfolio_action": "TARTÁS",
-            "new_entry_action": "KIVÁRÁS",
-            "plain_tech_summary": "Árfolyamadatok feldolgozás alatt.",
-            "sentiment_score": 50,
-            "reasoning": f"{reason_prefix}Nincs elegendő historikus árfolyamadat az értékeléshez.",
-            "translated_news": [],
-        }
-
-    price = tech_data.get("price")
-    sma50 = tech_data.get("sma_50")
-    sma200 = tech_data.get("sma_200")
-    rsi = tech_data.get("rsi_14")
-
-    existing_act = "TARTÁS"
-    new_act = "KIVÁRÁS"
-    score = 55
-    reasons = []
-
-    if price and sma50 and sma200:
-        if price > sma50 > sma200:
-            existing_act = "TARTÁS"
-            score = 72
-            reasons.append("Az árfolyam az 50 és 200 napos mozgóátlag felett halad, az emelkedő trend ép.")
-        elif price < sma50 < sma200:
-            existing_act = "RÉSZLEGES KITÁRAZÁS"
-            new_act = "KERÜLENDŐ"
-            score = 30
-            reasons.append("Az árfolyam mindkét fő mozgóátlag alá esett, csökkenő trend alakult ki.")
-        else:
-            reasons.append("Az árfolyam a két fő mozgóátlag között konszolidálódik.")
-    else:
-        reasons.append(tech_data.get("trend", "Vegyes technikai kép."))
-
-    if rsi is not None:
-        if rsi < 30:
-            existing_act = "HÍGÍTÁS (DCA)"
-            new_act = "ÉRDEMES VENNI"
-            score = 78
-            reasons.append(f"A 14 napos RSI ({rsi:.1f}) túladott zónába esett, kedvező beszállási szint.")
-        elif rsi > 72:
-            new_act = "KIVÁRÁS"
-            if currency in ("EUR", "USD") and fx_context and fx_context.get("pos_pct", 50) >= 75:
-                existing_act = "RÉSZLEGES KITÁRAZÁS"
-                reasons.append(f"Magas RSI ({rsi:.1f}) és gyenge forint mellett kedvező a részleges profitrealizálás.")
-            else:
-                reasons.append(f"A 14 napos RSI ({rsi:.1f}) túlvett tartományban van, érdemes kivárni a korrekciót.")
-
-    return {
-        "existing_portfolio_action": existing_act,
-        "new_entry_action": new_act,
-        "plain_tech_summary": tech_data.get("trend", ""),
-        "sentiment_score": score,
-        "reasoning": f"{reason_prefix}{' '.join(reasons)}",
-        "translated_news": [],
-    }
-
-
-def analyze_all_assets_batch(raw_items, fx_context):
+def analyze_all_assets_batch(raw_items, fx_map):
     """EGYETLEN kötegelt Gemini API hívással elemzi az összes eszközt és fordítja le a híreket."""
-    fx_summary = fx_context["summary"] if fx_context else "EUR/HUF adat nem elérhető."
+    eur_summary = fx_map["EUR"]["summary"] if fx_map.get("EUR") else "EUR/HUF adat nem elérhető."
+    usd_summary = fx_map["USD"]["summary"] if fx_map.get("USD") else "USD/HUF adat nem elérhető."
 
     assets_payload = []
     for item in raw_items:
@@ -699,18 +847,25 @@ def analyze_all_assets_batch(raw_items, fx_context):
         })
 
     prompt = f"""
-Gyakorlatias, döntésorientált befektetési tanácsadóként viselkedsz egy magyar befektető számára.
+Gyakorlatias, kockázattudatos befektetési tanácsadóként viselkedsz egy magyar befektető számára.
 Elemezd az alábbi összes portfólióeszközt EGYETLEN válaszban.
 
---- DEVIZAKÖRNYEZET (FORINT HATÁS) ---
-{fx_summary}
-Szabály: Ha az eszköz devizás (EUR vagy USD) és a forint gyenge zónában van, a forintra történő profitrealizálás (részleges kitárazás) kedvezőbb, az új devizavétel drágább. Forintos eszközöknél (.BD vagy HUF) a saját trendre és hírekre fókuszálj.
+--- DEVIZAKÖRNYEZET (SAJÁT DEVIZÁHOZ IGAZÍTVA) ---
+- EUR eszközökhöz: {eur_summary}
+- USD eszközökhöz: {usd_summary}
+- HUF eszközökhöz: devizahatás nem értelmezhető, kizárólag a saját trendre és hírekre fókuszálj.
+
+--- DÖNTÉSI SZABÁLYOK (SZIGORÚAN TARTSD BE) ---
+1. Emelkedő trendben (Ár > SMA 200) és alacsony RSI (< 35) mellett: Meglévő = "HÍGÍTÁS (DCA)", Új vétel = "ÉRDEMES VENNI". (Ha az adott eszköz devizájában erős a forint, említsd meg a kedvező devizaváltási lehetőséget is.)
+2. Megtört főtrendben (Ár < SMA 200) és alacsony RSI (< 32) mellett ("hulló kés"): pánikból eladni már késő (Meglévő = "TARTÁS"), de új vételhez meg kell várni az RSI 35 fölé fordulását és a hírek tisztázódását (Új vétel = "KIVÁRÁS"). Erős forint önmagában NEM indokol vételt!
+3. Tartós csökkenő trendben (Ár < SMA 50 < SMA 200) és nem túladott RSI (>= 32) mellett: Meglévő = "RÉSZLEGES KITÁRAZÁS", Új vétel = "KERÜLENDŐ".
+4. Túlvett RSI (> 70) esetén: ha az adott eszköz saját devizája (EUR vagy USD) gyenge forint zónában van, javasolj "RÉSZLEGES KITÁRAZÁS"-t forintra, különben "TARTÁS"-t; új vételre mindenképp "KIVÁRÁS"-t.
 
 --- ESZKÖZÖK LISTÁJA ---
 {json.dumps(assets_payload, ensure_ascii=False)}
 
 Feladat minden egyes "id" kulcshoz:
-1. Dönts külön a MEGLÉVŐ pozícióról és az ÚJ vásárlásról.
+1. Dönts külön a MEGLÉVŐ pozícióról és az ÚJ vásárlásról a technikai adatok + hírek + az eszköz saját devizapárja alapján.
 2. Fordítsd le magyarra a kapott angol/idegen nyelvű hírcímeket ("headlines").
 
 Válaszolj KIZÁRÓLAG érvényes JSON objektummal, ahol a legfelső szintű kulcsok az eszközök "id" értékei ("A0", "A1", ...), és minden eszköz alatt pontosan ezek a kulcsok szerepelnek:
@@ -718,7 +873,7 @@ Válaszolj KIZÁRÓLAG érvényes JSON objektummal, ahol a legfelső szintű kul
 - "new_entry_action": pontosan egy ezekből: "ÉRDEMES VENNI", "KIVÁRÁS", "KERÜLENDŐ"
 - "plain_tech_summary": 1 rövid magyar mondat szakszavak (RSI/SMA) nélkül arról, hol áll az árfolyam
 - "sentiment_score": egész szám 1 és 100 között
-- "reasoning": 2 tömör magyar mondat arról, miért ezt javaslod most
+- "reasoning": 2 tömör magyar mondat arról, miért ezt javaslod most (sződd bele a híreket és az eszköz saját devizahatását is)
 - "translated_news": lista a lefordított hírcímekkel (ha nem volt hír, [])
 """
 
@@ -763,8 +918,8 @@ def format_price(val):
     return f"{val:,.4f}" if val < 10 else f"{val:,.2f}"
 
 
-def render_technical_learning_panel(tech):
-    """Látható SMA 50 / SMA 200 / RSI értékelő és szabályalapú tanuló magyarázat."""
+def render_technical_learning_panel(tech, currency="USD", fx_map=None):
+    """Látható SMA 50 / SMA 200 / RSI értékelő és az egységes mátrix szerinti tanuló magyarázat."""
     if not tech:
         return
 
@@ -772,6 +927,7 @@ def render_technical_learning_panel(tech):
     sma50 = tech.get("sma_50")
     sma200 = tech.get("sma_200")
     rsi = tech.get("rsi_14")
+    eval_res = evaluate_technical_matrix(tech, currency, fx_map)
 
     st.markdown("##### 📐 Technikai mutatók és döntési logika (Tanuló nézet)")
 
@@ -790,70 +946,29 @@ def render_technical_learning_panel(tech):
         t2.metric("SMA 200 (hosszú táv)", "N/A", "Kevés adat (<200 nap)")
 
     if rsi is not None:
-        if rsi < 30:
-            rsi_zone = "Túladott (<30) • Hígítási zóna"
-        elif rsi > 70:
-            rsi_zone = "Túlvett (>70) • Túlfűtött"
-        else:
-            rsi_zone = "Semleges zóna (30–70)"
-        t3.metric("RSI (14 napos)", f"{rsi:.1f}", rsi_zone)
+        t3.metric("RSI (14 napos)", f"{rsi:.1f}", eval_res["rsi_badge"])
     else:
         t3.metric("RSI (14 napos)", "N/A", "Kevés adat (<15 nap)")
 
-    rules_notes = []
+    st.info(
+        f"{eval_res['trend_note']}\n\n"
+        f"{eval_res['rsi_note']}\n\n"
+        f"{eval_res['fx_note']}\n\n"
+        f"{eval_res['matrix_rule_note']}"
+    )
 
-    if price is not None and sma50 is not None and sma200 is not None:
-        if price > sma50 and sma50 > sma200:
-            rules_notes.append(
-                "✅ **Trend (SMA 50 / SMA 200):** Az árfolyam az SMA 50 felett, az SMA 50 pedig az SMA 200 felett halad (erős emelkedő trend / Aranykereszt) → **Meglévő pozíció: TARTÁS**."
-            )
-        elif price < sma50 and sma50 < sma200:
-            rules_notes.append(
-                "🔴 **Trend (SMA 50 / SMA 200):** Az árfolyam mindkét mozgóátlag alatt van, és az SMA 50 az SMA 200 alá esett (tartós csökkenő trend) → **Meglévő pozíció: KITÁRAZÁS / KOCKÁZATCSÖKKENTÉS**, új vétel: **KERÜLENDŐ**."
-            )
-        elif price < sma50 and price >= sma200:
-            rules_notes.append(
-                "⚖️ **Trend (SMA 50 / SMA 200):** Az árfolyam beesett az SMA 50 alá, de az SMA 200 még tartja (átmeneti korrekció emelkedő főtrendben) → **Meglévő pozíció: TARTÁS**, új vétel: **KIVÁRÁS** (támasz teszteléséig)."
-            )
-        else:
-            rules_notes.append(
-                "🟡 **Trend (SMA 50 / SMA 200):** Az árfolyam az SMA 200 közelében/alatt billeg, iránykeresés zajlik → **KIVÁRÁS** a trend megerősítéséig."
-            )
-    elif price is not None and sma50 is not None:
-        if price >= sma50:
-            rules_notes.append("✅ **Középtávú trend:** Az árfolyam az SMA 50 felett van → **TARTÁS**.")
-        else:
-            rules_notes.append("⚠️ **Középtávú trend:** Az árfolyam az SMA 50 alatt van → **KIVÁRÁS**.")
-
-    if rsi is not None:
-        if rsi < 30:
-            rules_notes.append(
-                f"🟢 **Lendület (RSI = {rsi:.1f}):** 30 alatti túladott zóna – statisztikailag gyakori a felpattanás → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI** (ha a főtrend nem omlott össze)."
-            )
-        elif rsi > 70:
-            rules_notes.append(
-                f"🟠 **Lendület (RSI = {rsi:.1f}):** 70 feletti túlvett zóna – rövid távon kifulladhat az emelkedés → **Új vétel: KIVÁRÁS**, meglévőnél **RÉSZLEGES KITÁRAZÁS** mérlegelhető."
-            )
-        else:
-            rules_notes.append(
-                f"🔵 **Lendület (RSI = {rsi:.1f}):** 30 és 70 közötti egészséges, kiegyensúlyozott tartomány → Nincs extrém beszállási vagy kiszállási kényszer (**TARTÁS / KIVÁRÁS**)."
-            )
-
-    if rules_notes:
-        st.info("\n\n".join(rules_notes))
-
-    with st.expander("📘 Gyors szabály-puska: Mikor mi a jelzés?"):
+    with st.expander("📘 Döntési mátrix puska: Mikor vételi jel az RSI < 30, és hogyan számít a deviza?"):
         st.markdown(
             """
-            * **TARTÁS:** Az árfolyam az **SMA 50** és az **SMA 200** felett halad, az RSI pedig **30–70** között mozog.
-            * **HÍGÍTÁS (DCA) / ÉRDEMES VENNI:** Az **RSI 30 alá** esik (túladott pánikzóna), vagy az árfolyam emelkedő főtrendben visszateszteli az **SMA 200** támaszt.
-            * **KIVÁRÁS:** Az árfolyam az SMA 50 és SMA 200 között oldalazik, vagy az **RSI 65–70 felett** van (túl drága az új beszálláshoz).
-            * **RÉSZLEGES / TELJES KITÁRAZÁS:** Az árfolyam tartósan az **SMA 200 alá** esik (trendtörés), vagy kiugró **RSI (>75)** mellett gyenge a forint (devizás eszközöknél).
+            * **Emelkedő főtrend (`Ár > SMA 200`) + Alacsony RSI (`< 35`):** Egészséges trendben átmeneti visszaesés → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI**. Ha közben az adott eszköz devizájához képest erős a forint, dupla előny (olcsó részvény + olcsó deviza).
+            * **Megtört főtrend (`Ár < SMA 200`) + Alacsony RSI (`< 32`) – „Hulló kés”:** Eladni a pánik alján már késő (**Meglévő: TARTÁS**), de új pénzzel meg kell várni, amíg az RSI visszafordul **35 fölé**, és tisztulnak a hírek (**Új vétel: KIVÁRÁS**). Az erős forint önmagában **nem** indokol részvényvételt.
+            * **Tartós eső trend (`Ár < SMA 50 < SMA 200`) + Nem túladott RSI (`≥ 32`):** A felpattanások kockázatcsökkentésre valók → **RÉSZLEGES KITÁRAZÁS / Új vétel: KERÜLENDŐ**.
+            * **Túlvett piac (`RSI > 70`):** Rövid távon túlhevült → **Új vétel: KIVÁRÁS**, devizás eszköznél gyenge forint mellett (az adott EUR/HUF vagy USD/HUF sáv tetején) **RÉSZLEGES KITÁRAZÁS**.
             """
         )
 
 
-def render_asset_details(item):
+def render_asset_details(item, fx_map=None):
     """Megjeleníti egy eszköz grafikonját, a tanuló SMA/RSI értékelőt és a magyar híreket."""
     tech = item["tech"]
     if tech and tech.get("chart_df") is not None and len(tech["chart_df"]) >= 2:
@@ -870,7 +985,7 @@ def render_asset_details(item):
             unsafe_allow_html=True,
         )
 
-    render_technical_learning_panel(tech)
+    render_technical_learning_panel(tech, item.get("currency", "USD"), fx_map)
 
     with st.expander("📰 Elemzett hírek (magyarra fordítva)"):
         if item["news_list"]:
@@ -894,8 +1009,8 @@ def run_full_analysis_with_progress():
     vig_funds = get_vig_funds_from_sheet(client)
     progress_bar.progress(15)
 
-    status_box.info("2/4 • EUR/HUF devizakörnyezet lekérése...")
-    fx_context = fetch_eurhuf_context()
+    status_box.info("2/4 • EUR/HUF és USD/HUF devizakörnyezet lekérése...")
+    fx_map = fetch_fx_context()
     progress_bar.progress(25)
 
     raw_items = []
@@ -943,18 +1058,26 @@ def run_full_analysis_with_progress():
     if not raw_items:
         progress_bar.empty()
         status_box.empty()
-        return [], fx_context, datetime.now().strftime("%Y.%m.%d. %H:%M"), False, "Nincs aktív eszköz.", None
+        return [], fx_map, datetime.now().strftime("%Y.%m.%d. %H:%M"), False, "Nincs aktív eszköz.", None
 
     progress_bar.progress(78)
     status_box.info(f"4/4 • Összesített AI elemzés és hírfordítás ({len(raw_items)} eszköz 1 csomagban)...")
-    ai_map, ai_err = analyze_all_assets_batch(raw_items, fx_context)
+    ai_map, ai_err = analyze_all_assets_batch(raw_items, fx_map)
 
     results = []
     for item in raw_items:
         ai_res = ai_map.get(item["id"])
         if not ai_res:
+            eval_res = evaluate_technical_matrix(item["tech"], item["currency"], fx_map)
             prefix = "[Szabályalapú mód] " if ai_err else ""
-            ai_res = generate_rule_based_fallback(item["tech"], item["currency"], fx_context, prefix)
+            ai_res = {
+                "existing_portfolio_action": eval_res["existing_action"],
+                "new_entry_action": eval_res["new_entry_action"],
+                "plain_tech_summary": eval_res["plain_summary"],
+                "sentiment_score": eval_res["score"],
+                "reasoning": f"{prefix}{eval_res['reasoning']}",
+                "translated_news": [],
+            }
 
         translated_titles = ai_res.get("translated_news", [])
         paired_news = []
@@ -969,6 +1092,7 @@ def run_full_analysis_with_progress():
         results.append({
             "name": item["name"],
             "ticker": item["ticker"],
+            "currency": item["currency"],
             "tech": item["tech"],
             "existing_action": ai_res.get("existing_portfolio_action", "TARTÁS"),
             "new_entry_action": ai_res.get("new_entry_action", "KIVÁRÁS"),
@@ -990,7 +1114,7 @@ def run_full_analysis_with_progress():
     progress_bar.empty()
     status_box.empty()
 
-    return results, fx_context, run_timestamp, log_ok, log_msg, ai_err
+    return results, fx_map, run_timestamp, log_ok, log_msg, ai_err
 
 
 # --- FELÜLET (UI) ---
@@ -998,7 +1122,7 @@ st.markdown(
     """
     <div class="main-banner">
         <h1>🔥 AI PIACI IRÁNYTŰ</h1>
-        <p>Gyors portfólió-döntéstámogató • Magyar blue chipek, VIG alapok & EUR/HUF hatás</p>
+        <p>Gyors portfólió-döntéstámogató • Magyar blue chipek, VIG alapok & EUR/USD/HUF hatás</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1013,7 +1137,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📧 E-mail Riasztások")
     alerts_enabled = st.toggle("Automatikus riasztás", value=True)
-    st.caption("Jelzést küld **KITÁRAZÁS** javaslat vagy **erős hígítási zóna** esetén.")
+    st.caption("Jelzést küld **KITÁRAZÁS**, **HÍGÍTÁS** vagy **ÉRDEMES VENNI** jelzés esetén.")
 
     if st.button("Teszt e-mail küldése", use_container_width=True):
         try:
@@ -1026,7 +1150,6 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Hiba a küldéskor: {e}")
 
-# Munkamenet-szintű gyorsítótár (1 órás érvényességgel), hogy nézetváltáskor azonnali legyen
 now_dt = datetime.now()
 cached = st.session_state.get("cached_payload")
 needs_refresh = (
@@ -1045,19 +1168,24 @@ if needs_refresh:
         st.error(f"Hiba az adatok betöltésekor: {e}")
         st.stop()
 
-data, fx_context, last_updated, log_ok, log_msg, ai_err = st.session_state["cached_payload"]["payload"]
+data, fx_map, last_updated, log_ok, log_msg, ai_err = st.session_state["cached_payload"]["payload"]
 
 if ai_err:
     if "429" in ai_err or "RESOURCE_EXHAUSTED" in ai_err.upper():
-        st.warning(
-            "ℹ️ **Ingyenes AI napi kvótalimit elérve:** Az alkalmazás nem akadt el, hanem automatikusan "
-            "a beépített SMA 50 / SMA 200 / RSI szabálymotor alapján számolta ki az értékeléseket."
+        st.info(
+            "ℹ️ **Ingyenes AI napi kvótalimit elérve:** A program automatikusan az egységesített "
+            "SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján értékelte az eszközöket."
         )
     else:
         st.warning(f"⚠️ **AI kiegészítő megjegyzés** (szabályalapú mód aktív): `{ai_err}`")
 
-if fx_context:
-    st.markdown(f'<div class="fx-strip">💱 {fx_context["summary"]}</div>', unsafe_allow_html=True)
+if fx_map and (fx_map.get("EUR") or fx_map.get("USD")):
+    fx_lines = []
+    if fx_map.get("EUR"):
+        fx_lines.append(f"🇪🇺 {fx_map['EUR']['summary']}")
+    if fx_map.get("USD"):
+        fx_lines.append(f"🇺🇸 {fx_map['USD']['summary']}")
+    st.markdown(f'<div class="fx-strip">{"<br>".join(fx_lines)}</div>', unsafe_allow_html=True)
 
 st.caption(f"⏱️ Frissítve: **{last_updated}** &nbsp;|&nbsp; 💾 {log_msg if log_ok else '⚠️ ' + log_msg}")
 
@@ -1065,7 +1193,6 @@ if not data:
     st.warning("Nincs 'IGEN' státuszú eszköz az 'Eszkozok' vagy 'VIG_Alapok' munkalapon.")
     st.stop()
 
-# Riasztások ellenőrzése nézettől függetlenül
 alert_map = {}
 if alerts_enabled:
     for item in data:
@@ -1076,7 +1203,6 @@ if alerts_enabled:
             if sent:
                 st.toast(f"Riasztás elküldve: {item['name']}", icon="🔥")
 
-# Nézetváltó és gyors szűrő
 ctrl_col1, ctrl_col2 = st.columns([2, 2])
 with ctrl_col1:
     view_mode = st.radio(
@@ -1096,7 +1222,6 @@ with ctrl_col2:
         label_visibility="collapsed",
     )
 
-# Szűrés alkalmazása
 filtered_data = []
 for item in data:
     ex_u = item["existing_action"].upper()
@@ -1124,6 +1249,7 @@ if view_mode == "📋 Listás nézet":
 
         table_rows.append({
             "Eszköz": f"{item['name']} ({item['ticker']})",
+            "Deviza": item["currency"],
             "Árfolyam": price_str,
             "Napi %": chg_str,
             "Saját pozíció": item["existing_action"],
@@ -1136,7 +1262,6 @@ if view_mode == "📋 Listás nézet":
     table_height = min(680, 42 + len(df_list) * 38)
     st.dataframe(df_list, use_container_width=True, hide_index=True, height=table_height)
 
-    # Kártyaváltás nélküli gyors részletnéző egy kiválasztott eszközhöz
     st.markdown("---")
     selected_label = st.selectbox(
         "🔎 Grafikon, SMA/RSI értékelő és magyarított hírek megtekintése ehhez az eszközhöz:",
@@ -1154,7 +1279,7 @@ if view_mode == "📋 Listás nézet":
                 f"Új vétel: **{selected_item['new_entry_action']}**"
             )
             st.write(selected_item["reasoning"])
-            render_asset_details(selected_item)
+            render_asset_details(selected_item, fx_map)
 
 # --- 2. KÁRTYÁS NÉZET ---
 else:
@@ -1207,4 +1332,4 @@ else:
                     _, msg_text = alert_status
                     st.caption(f"🔔 Riasztás: **{msg_text}**")
 
-                render_asset_details(item)
+                render_asset_details(item, fx_map)
