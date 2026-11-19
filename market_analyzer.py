@@ -171,12 +171,42 @@ def get_clean_gemini_key():
 
 
 GEMINI_API_KEY = get_clean_gemini_key()
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+
+def call_gemini_api(prompt):
+    """Meghívja a Gemini 2.5 Flash modellt, automatikusan kezelve az AQ. és az AIza kulcstípusokat is."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
+
+    primary_vertex = GEMINI_API_KEY.startswith("AQ.")
+    modes_to_try = [primary_vertex, not primary_vertex]
+    last_err = None
+
+    for use_vertex in modes_to_try:
+        try:
+            if use_vertex:
+                client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
+            else:
+                client = genai.Client(api_key=GEMINI_API_KEY)
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            return response.text or ""
+        except Exception as e:
+            last_err = e
+            err_upper = str(e).upper()
+            if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404"]):
+                continue
+            raise e
+
+    raise last_err
 
 
 def get_gspread_client():
@@ -385,7 +415,7 @@ def log_results_to_sheet(client, results, run_timestamp):
     """Kötegelve menti a sikeres elemzési eredményeket a Google Táblázat 'Naplo' munkalapjára."""
     valid_results = [r for r in results if not r.get("ai_error")]
     if not valid_results:
-        return False, "API kulcs hiba miatt a naplózás kihagyva."
+        return False, "AI hiba miatt a naplózás kihagyva."
 
     spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
     headers = [
@@ -578,17 +608,6 @@ def fetch_yahoo_data(ticker_symbol, asset_name):
 
 def analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, asset_currency="N/A"):
     """Kombinált portfólió-döntéstámogatás EUR/HUF devizahatással és magyar hírfordítással."""
-    if ai_client is None:
-        return {
-            "existing_portfolio_action": "TARTÁS",
-            "new_entry_action": "KIVÁRÁS",
-            "plain_tech_summary": "Hiányzó Gemini API kulcs.",
-            "sentiment_score": 50,
-            "reasoning": "A Streamlit Secrets beállításokból hiányzik a GEMINI_API_KEY.",
-            "translated_news": [],
-            "ai_error": True,
-        }
-
     if tech_data:
         rsi_str = f"{tech_data['rsi_14']:.1f}" if tech_data["rsi_14"] is not None else "N/A"
         sma50_str = f"{tech_data['sma_50']:,.4f}" if tech_data["sma_50"] is not None else "N/A"
@@ -640,23 +659,23 @@ def analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, asset
 - "translated_news": lista, amely a kapott hírek magyarra fordított címeit tartalmazza ugyanolyan sorrendben. Ha nem volt hír, üres lista [].
     """
     try:
-        response = ai_client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents=prompt,
-)
-        clean_json = response.text.replace("```json", "").replace("```", "").strip()
+        raw_text = call_gemini_api(prompt)
+        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
         parsed = json.loads(clean_json)
         parsed["ai_error"] = False
+        parsed["error_detail"] = ""
         return parsed
     except Exception as e:
+        err_msg = str(e)
         return {
             "existing_portfolio_action": "TARTÁS",
             "new_entry_action": "KIVÁRÁS",
             "plain_tech_summary": "AI elemzés átmenetileg nem elérhető.",
             "sentiment_score": 50,
-            "reasoning": f"Elemzési hiba: {str(e)}",
+            "reasoning": f"Elemzési hiba: {err_msg}",
             "translated_news": [],
             "ai_error": True,
+            "error_detail": err_msg,
         }
 
 
@@ -703,21 +722,18 @@ def render_technical_learning_panel(tech):
 
     t1, t2, t3 = st.columns(3)
 
-    # SMA 50 kártya + eltérés
     if sma50 is not None and price is not None:
         diff50 = ((price - sma50) / sma50) * 100
         t1.metric("SMA 50 (középtáv)", format_price(sma50), f"{diff50:+.1f}% az árhoz képest")
     else:
         t1.metric("SMA 50 (középtáv)", "N/A", "Kevés adat (<50 nap)")
 
-    # SMA 200 kártya + eltérés
     if sma200 is not None and price is not None:
         diff200 = ((price - sma200) / sma200) * 100
         t2.metric("SMA 200 (hosszú táv)", format_price(sma200), f"{diff200:+.1f}% az árhoz képest")
     else:
         t2.metric("SMA 200 (hosszú táv)", "N/A", "Kevés adat (<200 nap)")
 
-    # RSI 14 kártya + zóna
     if rsi is not None:
         if rsi < 30:
             rsi_zone = "Túladott (<30) • Hígítási zóna"
@@ -729,7 +745,6 @@ def render_technical_learning_panel(tech):
     else:
         t3.metric("RSI (14 napos)", "N/A", "Kevés adat (<15 nap)")
 
-    # Szabályalapú indoklás összeállítása az aktuális értékekre
     rules_notes = []
 
     if price is not None and sma50 is not None and sma200 is not None:
@@ -852,6 +867,7 @@ def run_full_analysis():
             "reasoning": ai_res.get("reasoning", ""),
             "news_list": paired_news,
             "ai_error": ai_res.get("ai_error", False),
+            "error_detail": ai_res.get("error_detail", ""),
         })
 
     # 2. VIG Alapkezelő alapok (a 'VIG_Alapok' munkalapról)
@@ -889,6 +905,7 @@ def run_full_analysis():
                 "reasoning": ai_res.get("reasoning", ""),
                 "news_list": paired_news,
                 "ai_error": ai_res.get("ai_error", False),
+                "error_detail": ai_res.get("error_detail", ""),
             })
 
     run_timestamp = datetime.now().strftime("%Y.%m.%d. %H:%M")
@@ -941,12 +958,14 @@ with st.spinner("Piaci adatok, forintárfolyam és VIG alapok elemzése..."):
         st.error(f"Hiba a Google Táblázat elérésekor: {e}")
         st.stop()
 
-# Ha az AI API kulcs hibás volt, azonnal jelezzük és töröljük a hibás cache-t
-if any(item.get("ai_error") for item in data):
+# Ha az AI hívás hibára futott, a pontos hibaüzenetet írjuk ki, és ürítjük a hibás cache-t
+first_ai_err = next((item.get("error_detail") for item in data if item.get("ai_error")), None)
+if first_ai_err:
+    key_prefix = f"{GEMINI_API_KEY[:6]}..." if len(GEMINI_API_KEY) >= 6 else "ÜRES"
     st.error(
-        "⚠️ **Gemini API kulcs hiba (`API_KEY_INVALID`):** A piaci adatok és az SMA/RSI számítások betöltöttek, "
-        "de a szöveges AI-elemzéshez ellenőrizd a Streamlit Cloud **Settings → Secrets** alatt a "
-        '`GEMINI_API_KEY = "AIzaSy..."` sort (felesleges szóközök és dupla idézőjelek nélkül), majd nyomj a bal oldali **Frissítés most** gombra.'
+        f"⚠️ **Gemini AI hiba** (betöltött kulcs előtagja: `{key_prefix}`): `{first_ai_err}`\n\n"
+        "Ha most módosítottad a `requirements.txt` fájlt vagy a `Secrets` beállításokat, a jobb alsó "
+        "**Manage app → ⋮ → Reboot app** gombbal indítsd újra a konténert."
     )
     st.cache_data.clear()
 
