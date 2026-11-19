@@ -5,7 +5,6 @@ import yfinance as yf
 from google import genai
 import pandas as pd
 import json
-import time
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -179,8 +178,8 @@ SCOPES = [
 ]
 
 
-def call_gemini_api(prompt):
-    """Meghívja a Gemini 3.8 Flash modellt, automatikus 429-es kvótavárakozással."""
+def call_gemini_single_batch(prompt):
+    """Egyetlen kötegelt kérést küld a Gemini API-nak várakozás és végtelen ciklus nélkül."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
@@ -189,30 +188,25 @@ def call_gemini_api(prompt):
     last_err = None
 
     for use_vertex in modes_to_try:
-        for attempt in range(3):
-            try:
-                if use_vertex:
-                    client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
-                else:
-                    client = genai.Client(api_key=GEMINI_API_KEY)
+        try:
+            if use_vertex:
+                client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
+            else:
+                client = genai.Client(api_key=GEMINI_API_KEY)
 
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=prompt,
-                )
-                return response.text or ""
-            except Exception as e:
-                last_err = e
-                err_upper = str(e).upper()
-                # Percenkénti 5 kéréses Free Tier limit elérésekor várunk és újrapróbáljuk
-                if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
-                    if attempt < 2:
-                        time.sleep(16)
-                        continue
-                    raise e
-                if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403"]):
-                    break
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=prompt,
+            )
+            return response.text or ""
+        except Exception as e:
+            last_err = e
+            err_upper = str(e).upper()
+            if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
                 raise e
+            if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403"]):
+                continue
+            raise e
 
     raise last_err
 
@@ -251,9 +245,6 @@ def send_gmail_alert(subject, plain_body, html_body):
 
 def check_and_send_alert(item):
     """Riasztást küld, ha KITÁRAZÁS javasolt vagy az RSI 30 alatti."""
-    if item.get("ai_error"):
-        return False, None
-
     existing_act = item.get("existing_action", "").upper()
     tech = item.get("tech") or {}
     rsi = tech.get("rsi_14")
@@ -267,7 +258,7 @@ def check_and_send_alert(item):
     if not triggers:
         return False, None
 
-    alert_key = f"{item['ticker']}_{'_'.join(triggers)}"
+    alert_key = f"{item['name']}_{item['ticker']}_{'_'.join(triggers)}"
     history = get_alert_history()
     now = datetime.now()
 
@@ -327,7 +318,7 @@ def check_and_send_alert(item):
 def fetch_eurhuf_context():
     """Lekéri az EUR/HUF árfolyamhelyzetet a devizás profitrealizálás időzítéséhez."""
     try:
-        hist = yf.Ticker("EURHUF=X").history(period="1y", interval="1d")
+        hist = yf.Ticker("EURHUF=X").history(period="1y", interval="1d", timeout=10)
         if hist is None or hist.empty or "Close" not in hist:
             return None
 
@@ -420,10 +411,9 @@ def get_vig_funds_from_sheet(client):
 
 
 def log_results_to_sheet(client, results, run_timestamp):
-    """Kötegelve menti a sikeres elemzési eredményeket a Google Táblázat 'Naplo' munkalapjára."""
-    valid_results = [r for r in results if not r.get("ai_error")]
-    if not valid_results:
-        return False, "AI hiba miatt a naplózás kihagyva."
+    """Kötegelve menti az elemzési eredményeket a Google Táblázat 'Naplo' munkalapjára."""
+    if not results:
+        return False, "Nincs menthető adat."
 
     spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
     headers = [
@@ -452,7 +442,7 @@ def log_results_to_sheet(client, results, run_timestamp):
         naplo_sheet.append_row(headers, value_input_option="USER_ENTERED")
 
     rows_to_append = []
-    for item in valid_results:
+    for item in results:
         tech = item.get("tech") or {}
         price_val = round(tech["price"], 4) if tech.get("price") is not None else ""
         change_val = round(tech["change_pct"], 2) if tech.get("change_pct") is not None else ""
@@ -556,9 +546,9 @@ def search_news_fallback(query_text):
     if not hasattr(yf, "Search"):
         return items
     try:
-        search_res = yf.Search(query_text, news_count=5)
+        search_res = yf.Search(query_text, news_count=3)
         raw = getattr(search_res, "news", []) or []
-        for idx, item in enumerate(raw[:5], start=1):
+        for idx, item in enumerate(raw[:3], start=1):
             title = item.get("title", "")
             publisher = item.get("publisher", "Forrás")
             url = item.get("link", "")
@@ -575,18 +565,18 @@ def search_news_fallback(query_text):
 
 
 def fetch_yahoo_data(ticker_symbol, asset_name):
-    """Lekéri a 2 éves grafikonadatokat és a híreket."""
+    """Lekéri a 2 éves grafikonadatokat és a legfontosabb híreket (időtúllépés-védelemmel)."""
     ticker = yf.Ticker(ticker_symbol)
 
     try:
-        hist = ticker.history(period="2y", interval="1d")
+        hist = ticker.history(period="2y", interval="1d", timeout=10)
         tech_data = calculate_technical_indicators(hist)
     except Exception:
         tech_data = None
 
     news_items = []
     try:
-        raw_news = ticker.news[:5] if ticker.news else []
+        raw_news = ticker.news[:3] if ticker.news else []
         for idx, item in enumerate(raw_news, start=1):
             content = item.get("content", item)
             title = content.get("title", "")
@@ -614,77 +604,128 @@ def fetch_yahoo_data(ticker_symbol, asset_name):
     return tech_data, news_items
 
 
-def analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, asset_currency="N/A"):
-    """Kombinált portfólió-döntéstámogatás EUR/HUF devizahatással és magyar hírfordítással."""
-    if tech_data:
-        rsi_str = f"{tech_data['rsi_14']:.1f}" if tech_data["rsi_14"] is not None else "N/A"
-        sma50_str = f"{tech_data['sma_50']:,.4f}" if tech_data["sma_50"] is not None else "N/A"
-        sma200_str = f"{tech_data['sma_200']:,.4f}" if tech_data["sma_200"] is not None else "N/A"
-        tech_summary = (
-            f"Aktuális ár: {tech_data['price']:,.4f} (Utolsó változás: {tech_data['change_pct']:+.2f}%)\n"
-            f"14 napos RSI: {rsi_str}\n"
-            f"50 napos mozgóátlag: {sma50_str}\n"
-            f"200 napos mozgóátlag: {sma200_str}\n"
-            f"Trend: {tech_data['trend']}"
-        )
-    else:
-        tech_summary = "Technikai adatok nem elérhetők."
-
-    fx_summary = fx_context["summary"] if fx_context else "EUR/HUF adat nem elérhető."
-
-    if news_items:
-        news_block = "\n".join([f"[{n['id']}] {n['title']} ({n['publisher']})" for n in news_items])
-    else:
-        news_block = "Nincsenek friss hírek az elmúlt napokból."
-
-    prompt = f"""
-    Gyakorlatias, döntésorientált befektetési tanácsadóként viselkedsz egy magyar befektető számára. A felhasználó reggel gyorsan ránéz a mobiljára, és nem tőzsdei szakszavakat, hanem egyértelmű cselekvési iránymutatást akar látni.
-
-    Eszköz: {name} ({ticker}) | Eszköz devizaneme: {asset_currency}
-
-    --- DEVIZAKÖRNYEZET (FORINT HATÁS) ---
-    {fx_summary}
-    Szabály a devizahatáshoz: Ha az eszköz devizás (EUR vagy USD) és a forint gyenge zónában van, vedd figyelembe, hogy a forintra történő profitrealizálás (részleges kitárazás) kedvezőbb, míg az új devizavétel drágább. Ha az eszköz forintos (.BD részvény vagy HUF alap), a saját trendjére és híreire fókuszálj.
-
-    --- HÁTTÉR TECHNIKAI ADATOK ---
-    {tech_summary}
-
-    --- FRISS PIACI HÍREK ---
-    {news_block}
-
-    Feladat:
-1. A technikai adatok, a hírek és a forintárfolyam-hatás alapján dönts külön a MEGLÉVŐ portfólióban lévő pozícióról, és külön az ÚJ vásárlásról.
-2. Fordítsd le magyarra a fenti hírek címeit.
-
-    Válaszolj KIZÁRÓLAG érvényes JSON formátumban, pontosan ezekkel a kulcsokkal:
-- "existing_portfolio_action": pontosan az egyik érték ezek közül:
-      "TARTÁS", "HÍGÍTÁS (DCA)", "RÉSZLEGES KITÁRAZÁS", "TELJES KITÁRAZÁS".
-- "new_entry_action": pontosan az egyik érték ezek közül:
-      "ÉRDEMES VENNI", "KIVÁRÁS", "KERÜLENDŐ".
-- "plain_tech_summary": 1 rövid, közérthető magyar mondat szakszavak (RSI/SMA) nélkül arról, hol áll most az árfolyam.
-- "sentiment_score": egész szám 1 és 100 között.
-- "reasoning": maximum 2-3 tömör, lényegre törő magyar mondat arról, miért ezt javaslod most (ha releváns, térj ki a forintárfolyam hatására is).
-- "translated_news": lista, amely a kapott hírek magyarra fordított címeit tartalmazza ugyanolyan sorrendben. Ha nem volt hír, üres lista [].
-    """
-    try:
-        raw_text = call_gemini_api(prompt)
-        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(clean_json)
-        parsed["ai_error"] = False
-        parsed["error_detail"] = ""
-        return parsed
-    except Exception as e:
-        err_msg = str(e)
+def generate_rule_based_fallback(tech_data, currency, fx_context, reason_prefix=""):
+    """Szabályalapú döntés és magyar összefoglaló, ha az AI kvóta átmenetileg kimerült."""
+    if not tech_data:
         return {
             "existing_portfolio_action": "TARTÁS",
             "new_entry_action": "KIVÁRÁS",
-            "plain_tech_summary": "AI elemzés átmenetileg nem elérhető.",
+            "plain_tech_summary": "Árfolyamadatok feldolgozás alatt.",
             "sentiment_score": 50,
-            "reasoning": f"Elemzési hiba: {err_msg}",
+            "reasoning": f"{reason_prefix}Nincs elegendő historikus árfolyamadat az értékeléshez.",
             "translated_news": [],
-            "ai_error": True,
-            "error_detail": err_msg,
         }
+
+    price = tech_data.get("price")
+    sma50 = tech_data.get("sma_50")
+    sma200 = tech_data.get("sma_200")
+    rsi = tech_data.get("rsi_14")
+
+    existing_act = "TARTÁS"
+    new_act = "KIVÁRÁS"
+    score = 55
+    reasons = []
+
+    if price and sma50 and sma200:
+        if price > sma50 > sma200:
+            existing_act = "TARTÁS"
+            score = 72
+            reasons.append("Az árfolyam az 50 és 200 napos mozgóátlag felett halad, az emelkedő trend ép.")
+        elif price < sma50 < sma200:
+            existing_act = "RÉSZLEGES KITÁRAZÁS"
+            new_act = "KERÜLENDŐ"
+            score = 30
+            reasons.append("Az árfolyam mindkét fő mozgóátlag alá esett, csökkenő trend alakult ki.")
+        else:
+            reasons.append("Az árfolyam a két fő mozgóátlag között konszolidálódik.")
+    else:
+        reasons.append(tech_data.get("trend", "Vegyes technikai kép."))
+
+    if rsi is not None:
+        if rsi < 30:
+            existing_act = "HÍGÍTÁS (DCA)"
+            new_act = "ÉRDEMES VENNI"
+            score = 78
+            reasons.append(f"A 14 napos RSI ({rsi:.1f}) túladott zónába esett, kedvező beszállási szint.")
+        elif rsi > 72:
+            new_act = "KIVÁRÁS"
+            if currency in ("EUR", "USD") and fx_context and fx_context.get("pos_pct", 50) >= 75:
+                existing_act = "RÉSZLEGES KITÁRAZÁS"
+                reasons.append(f"Magas RSI ({rsi:.1f}) és gyenge forint mellett kedvező a részleges profitrealizálás.")
+            else:
+                reasons.append(f"A 14 napos RSI ({rsi:.1f}) túlvett tartományban van, érdemes kivárni a korrekciót.")
+
+    return {
+        "existing_portfolio_action": existing_act,
+        "new_entry_action": new_act,
+        "plain_tech_summary": tech_data.get("trend", ""),
+        "sentiment_score": score,
+        "reasoning": f"{reason_prefix}{' '.join(reasons)}",
+        "translated_news": [],
+    }
+
+
+def analyze_all_assets_batch(raw_items, fx_context):
+    """EGYETLEN kötegelt Gemini API hívással elemzi az összes eszközt és fordítja le a híreket."""
+    fx_summary = fx_context["summary"] if fx_context else "EUR/HUF adat nem elérhető."
+
+    assets_payload = []
+    for item in raw_items:
+        tech = item["tech"]
+        if tech:
+            rsi_str = f"{tech['rsi_14']:.1f}" if tech["rsi_14"] is not None else "N/A"
+            sma50_str = f"{tech['sma_50']:,.4f}" if tech["sma_50"] is not None else "N/A"
+            sma200_str = f"{tech['sma_200']:,.4f}" if tech["sma_200"] is not None else "N/A"
+            tech_txt = (
+                f"Ár: {tech['price']:,.4f} ({tech['change_pct']:+.2f}%), "
+                f"RSI14: {rsi_str}, SMA50: {sma50_str}, SMA200: {sma200_str}, Trend: {tech['trend']}"
+            )
+        else:
+            tech_txt = "Nincs technikai adat."
+
+        assets_payload.append({
+            "id": item["id"],
+            "name": item["name"],
+            "ticker": item["ticker"],
+            "currency": item["currency"],
+            "technical": tech_txt,
+            "headlines": [n["title"] for n in item["raw_news"]],
+        })
+
+    prompt = f"""
+Gyakorlatias, döntésorientált befektetési tanácsadóként viselkedsz egy magyar befektető számára.
+Elemezd az alábbi összes portfólióeszközt EGYETLEN válaszban.
+
+--- DEVIZAKÖRNYEZET (FORINT HATÁS) ---
+{fx_summary}
+Szabály: Ha az eszköz devizás (EUR vagy USD) és a forint gyenge zónában van, a forintra történő profitrealizálás (részleges kitárazás) kedvezőbb, az új devizavétel drágább. Forintos eszközöknél (.BD vagy HUF) a saját trendre és hírekre fókuszálj.
+
+--- ESZKÖZÖK LISTÁJA ---
+{json.dumps(assets_payload, ensure_ascii=False)}
+
+Feladat minden egyes "id" kulcshoz:
+1. Dönts külön a MEGLÉVŐ pozícióról és az ÚJ vásárlásról.
+2. Fordítsd le magyarra a kapott angol/idegen nyelvű hírcímeket ("headlines").
+
+Válaszolj KIZÁRÓLAG érvényes JSON objektummal, ahol a legfelső szintű kulcsok az eszközök "id" értékei ("A0", "A1", ...), és minden eszköz alatt pontosan ezek a kulcsok szerepelnek:
+- "existing_portfolio_action": pontosan egy ezekből: "TARTÁS", "HÍGÍTÁS (DCA)", "RÉSZLEGES KITÁRAZÁS", "TELJES KITÁRAZÁS"
+- "new_entry_action": pontosan egy ezekből: "ÉRDEMES VENNI", "KIVÁRÁS", "KERÜLENDŐ"
+- "plain_tech_summary": 1 rövid magyar mondat szakszavak (RSI/SMA) nélkül arról, hol áll az árfolyam
+- "sentiment_score": egész szám 1 és 100 között
+- "reasoning": 2 tömör magyar mondat arról, miért ezt javaslod most
+- "translated_news": lista a lefordított hírcímekkel (ha nem volt hír, [])
+"""
+
+    try:
+        raw_text = call_gemini_single_batch(prompt)
+        start_idx = raw_text.find("{")
+        end_idx = raw_text.rfind("}")
+        if start_idx == -1 or end_idx == -1:
+            raise ValueError("Az AI válasz nem tartalmazott érvényes JSON objektumot.")
+        parsed_map = json.loads(raw_text[start_idx:end_idx + 1])
+        return parsed_map, None
+    except Exception as e:
+        return {}, str(e)
 
 
 def get_badge_class(action_text):
@@ -836,33 +877,83 @@ def render_asset_details(item):
             st.write("Nincsenek friss hírek az elmúlt napokból.")
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def run_full_analysis():
-    """Futtatja a teljes elemzést kvótaütemezéssel (5 kérés/perc Free Tier limithez igazítva)."""
+def run_full_analysis_with_progress():
+    """Élő folyamatjelzővel futtatja az adatgyűjtést és az 1-hívásos kötegelt AI elemzést."""
+    status_box = st.empty()
+    progress_bar = st.progress(0)
+
+    status_box.info("1/4 • Csatlakozás a Google Táblázathoz...")
     client = get_gspread_client()
-    fx_context = fetch_eurhuf_context()
     assets = get_active_assets_from_sheet(client)
     vig_funds = get_vig_funds_from_sheet(client)
-    results = []
-    api_calls_made = 0
+    progress_bar.progress(15)
 
-    # 1. Tőzsdei eszközök (Yahoo Finance)
-    for asset in assets:
+    status_box.info("2/4 • EUR/HUF devizakörnyezet lekérése...")
+    fx_context = fetch_eurhuf_context()
+    progress_bar.progress(25)
+
+    raw_items = []
+    total_count = len(assets) + len(vig_funds)
+
+    for idx, asset in enumerate(assets):
         ticker = str(asset["ticker"]).strip()
         name = str(asset.get("name", ticker)).strip()
         currency = infer_currency_from_ticker(ticker)
 
-        tech_data, news_items = fetch_yahoo_data(ticker, name)
+        if total_count > 0:
+            pct = 25 + int((idx / total_count) * 45)
+            progress_bar.progress(min(70, pct))
+            status_box.info(f"3/4 • Árfolyamok letöltése ({idx + 1}/{total_count}): **{name}** ({ticker})...")
 
-        if api_calls_made > 0:
-            time.sleep(12.5)
-        ai_res = analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, currency)
-        api_calls_made += 1
+        tech_data, news_items = fetch_yahoo_data(ticker, name)
+        raw_items.append({
+            "id": f"A{len(raw_items)}",
+            "name": name,
+            "ticker": ticker,
+            "currency": currency,
+            "tech": tech_data,
+            "raw_news": news_items,
+        })
+
+    if vig_funds:
+        vig_news = search_news_fallback("VIG Asset Management")
+        for f_idx, fund in enumerate(vig_funds):
+            step_num = len(assets) + f_idx + 1
+            if total_count > 0:
+                pct = 25 + int(((step_num - 1) / total_count) * 45)
+                progress_bar.progress(min(70, pct))
+                status_box.info(f"3/4 • VIG alap feldolgozása ({step_num}/{total_count}): **{fund['name']}**...")
+
+            tech_data = calculate_technical_indicators(fund["hist_df"])
+            raw_items.append({
+                "id": f"A{len(raw_items)}",
+                "name": fund["name"],
+                "ticker": fund["ticker"],
+                "currency": fund["currency"],
+                "tech": tech_data,
+                "raw_news": vig_news,
+            })
+
+    if not raw_items:
+        progress_bar.empty()
+        status_box.empty()
+        return [], fx_context, datetime.now().strftime("%Y.%m.%d. %H:%M"), False, "Nincs aktív eszköz.", None
+
+    progress_bar.progress(78)
+    status_box.info(f"4/4 • Összesített AI elemzés és hírfordítás ({len(raw_items)} eszköz 1 csomagban)...")
+    ai_map, ai_err = analyze_all_assets_batch(raw_items, fx_context)
+
+    results = []
+    for item in raw_items:
+        ai_res = ai_map.get(item["id"])
+        if not ai_res:
+            prefix = "[Szabályalapú mód] " if ai_err else ""
+            ai_res = generate_rule_based_fallback(item["tech"], item["currency"], fx_context, prefix)
 
         translated_titles = ai_res.get("translated_news", [])
         paired_news = []
-        for idx, orig in enumerate(news_items):
-            hu_title = translated_titles[idx] if idx < len(translated_titles) else orig["title"]
+        for n_idx, orig in enumerate(item["raw_news"]):
+            hu_title = translated_titles[n_idx] if n_idx < len(translated_titles) else orig["title"]
             paired_news.append({
                 "hu_title": hu_title,
                 "publisher": orig["publisher"],
@@ -870,61 +961,18 @@ def run_full_analysis():
             })
 
         results.append({
-            "name": name,
-            "ticker": ticker,
-            "tech": tech_data,
+            "name": item["name"],
+            "ticker": item["ticker"],
+            "tech": item["tech"],
             "existing_action": ai_res.get("existing_portfolio_action", "TARTÁS"),
             "new_entry_action": ai_res.get("new_entry_action", "KIVÁRÁS"),
             "plain_tech": ai_res.get("plain_tech_summary", ""),
             "score": ai_res.get("sentiment_score", 50),
             "reasoning": ai_res.get("reasoning", ""),
             "news_list": paired_news,
-            "ai_error": ai_res.get("ai_error", False),
-            "error_detail": ai_res.get("error_detail", ""),
         })
 
-    # 2. VIG Alapkezelő alapok (a 'VIG_Alapok' munkalapról)
-    if vig_funds:
-        vig_news = search_news_fallback("VIG Asset Management")
-        for fund in vig_funds:
-            tech_data = calculate_technical_indicators(fund["hist_df"])
-
-            if api_calls_made > 0:
-                time.sleep(12.5)
-            ai_res = analyze_asset_with_ai(
-                fund["name"],
-                fund["ticker"],
-                tech_data,
-                vig_news,
-                fx_context,
-                fund["currency"],
-            )
-            api_calls_made += 1
-
-            translated_titles = ai_res.get("translated_news", [])
-            paired_news = []
-            for idx, orig in enumerate(vig_news):
-                hu_title = translated_titles[idx] if idx < len(translated_titles) else orig["title"]
-                paired_news.append({
-                    "hu_title": hu_title,
-                    "publisher": orig["publisher"],
-                    "url": orig["url"],
-                })
-
-            results.append({
-                "name": fund["name"],
-                "ticker": fund["ticker"],
-                "tech": tech_data,
-                "existing_action": ai_res.get("existing_portfolio_action", "TARTÁS"),
-                "new_entry_action": ai_res.get("new_entry_action", "KIVÁRÁS"),
-                "plain_tech": ai_res.get("plain_tech_summary", ""),
-                "score": ai_res.get("sentiment_score", 50),
-                "reasoning": ai_res.get("reasoning", ""),
-                "news_list": paired_news,
-                "ai_error": ai_res.get("ai_error", False),
-                "error_detail": ai_res.get("error_detail", ""),
-            })
-
+    progress_bar.progress(92)
     run_timestamp = datetime.now().strftime("%Y.%m.%d. %H:%M")
 
     try:
@@ -932,7 +980,11 @@ def run_full_analysis():
     except Exception as e:
         log_ok, log_msg = False, f"Naplózási hiba: {e}"
 
-    return results, fx_context, run_timestamp, log_ok, log_msg
+    progress_bar.progress(100)
+    progress_bar.empty()
+    status_box.empty()
+
+    return results, fx_context, run_timestamp, log_ok, log_msg, ai_err
 
 
 # --- FELÜLET (UI) ---
@@ -949,7 +1001,7 @@ st.markdown(
 with st.sidebar:
     st.markdown("### ⚡ Vezérlőpult")
     if st.button("🔄 Frissítés most (Élő adat)", use_container_width=True):
-        st.cache_data.clear()
+        st.session_state.pop("cached_payload", None)
         st.rerun()
 
     st.markdown("---")
@@ -968,23 +1020,35 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Hiba a küldéskor: {e}")
 
-with st.spinner("Piaci adatok, forintárfolyam és VIG alapok elemzése (ingyenes API kvóta miatt ~12 mp/eszköz)..."):
+# Munkamenet-szintű gyorsítótár (1 órás érvényességgel), hogy nézetváltáskor azonnali legyen
+now_dt = datetime.now()
+cached = st.session_state.get("cached_payload")
+needs_refresh = (
+    cached is None
+    or (now_dt - cached["fetched_at"]) > timedelta(hours=1)
+)
+
+if needs_refresh:
     try:
-        data, fx_context, last_updated, log_ok, log_msg = run_full_analysis()
+        res_tuple = run_full_analysis_with_progress()
+        st.session_state["cached_payload"] = {
+            "fetched_at": now_dt,
+            "payload": res_tuple,
+        }
     except Exception as e:
-        st.error(f"Hiba a Google Táblázat elérésekor: {e}")
+        st.error(f"Hiba az adatok betöltésekor: {e}")
         st.stop()
 
-# Ha az AI hívás hibára futott, a pontos hibaüzenetet írjuk ki, és ürítjük a hibás cache-t
-first_ai_err = next((item.get("error_detail") for item in data if item.get("ai_error")), None)
-if first_ai_err:
-    key_prefix = f"{GEMINI_API_KEY[:6]}..." if len(GEMINI_API_KEY) >= 6 else "ÜRES"
-    st.error(
-        f"⚠️ **Gemini AI hiba** (betöltött kulcs előtagja: `{key_prefix}`): `{first_ai_err}`\n\n"
-        "Ha most módosítottad a `requirements.txt` fájlt vagy a `Secrets` beállításokat, a jobb alsó "
-        "**Manage app → ⋮ → Reboot app** gombbal indítsd újra a konténert."
-    )
-    st.cache_data.clear()
+data, fx_context, last_updated, log_ok, log_msg, ai_err = st.session_state["cached_payload"]["payload"]
+
+if ai_err:
+    if "429" in ai_err or "RESOURCE_EXHAUSTED" in ai_err.upper():
+        st.warning(
+            "ℹ️ **Ingyenes AI napi kvótalimit elérve:** Az alkalmazás nem akadt el, hanem automatikusan "
+            "a beépített SMA 50 / SMA 200 / RSI szabálymotor alapján számolta ki az értékeléseket."
+        )
+    else:
+        st.warning(f"⚠️ **AI kiegészítő megjegyzés** (szabályalapú mód aktív): `{ai_err}`")
 
 if fx_context:
     st.markdown(f'<div class="fx-strip">💱 {fx_context["summary"]}</div>', unsafe_allow_html=True)
@@ -999,9 +1063,10 @@ if not data:
 alert_map = {}
 if alerts_enabled:
     for item in data:
+        item_uid = f"{item['name']}_{item['ticker']}"
         sent, status_msg = check_and_send_alert(item)
         if status_msg:
-            alert_map[item["ticker"]] = (sent, status_msg)
+            alert_map[item_uid] = (sent, status_msg)
             if sent:
                 st.toast(f"Riasztás elküldve: {item['name']}", icon="🔥")
 
@@ -1089,7 +1154,8 @@ if view_mode == "📋 Listás nézet":
 else:
     cols = st.columns(2)
     for idx, item in enumerate(filtered_data):
-        alert_status = alert_map.get(item["ticker"])
+        item_uid = f"{item['name']}_{item['ticker']}"
+        alert_status = alert_map.get(item_uid)
         with cols[idx % 2]:
             with st.container(border=True):
                 tech = item["tech"]
