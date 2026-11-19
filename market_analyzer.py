@@ -2,7 +2,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 import yfinance as yf
-import google.generativeai as genai
+from google import genai
 import pandas as pd
 import json
 import smtplib
@@ -171,11 +171,7 @@ def get_clean_gemini_key():
 
 
 GEMINI_API_KEY = get_clean_gemini_key()
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.5-flash")
-else:
-    model = None
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -582,7 +578,7 @@ def fetch_yahoo_data(ticker_symbol, asset_name):
 
 def analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, asset_currency="N/A"):
     """Kombinált portfólió-döntéstámogatás EUR/HUF devizahatással és magyar hírfordítással."""
-    if model is None:
+    if ai_client is None:
         return {
             "existing_portfolio_action": "TARTÁS",
             "new_entry_action": "KIVÁRÁS",
@@ -644,7 +640,10 @@ def analyze_asset_with_ai(name, ticker, tech_data, news_items, fx_context, asset
 - "translated_news": lista, amely a kapott hírek magyarra fordított címeit tartalmazza ugyanolyan sorrendben. Ha nem volt hír, üres lista [].
     """
     try:
-        response = model.generate_content(prompt)
+        response = ai_client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents=prompt,
+)
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
         parsed = json.loads(clean_json)
         parsed["ai_error"] = False
