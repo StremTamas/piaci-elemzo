@@ -195,9 +195,9 @@ def call_gemini_api(prompt):
                 client = genai.Client(api_key=GEMINI_API_KEY)
 
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
+    model="gemini-3.8-flash",
+    contents=prompt,
+)
             return response.text or ""
         except Exception as e:
             last_err = e
