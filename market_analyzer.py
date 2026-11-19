@@ -5,6 +5,7 @@ import yfinance as yf
 from google import genai
 import pandas as pd
 import json
+import time
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -179,7 +180,7 @@ SCOPES = [
 
 
 def call_gemini_single_batch(prompt):
-    """Egyetlen kötegelt kérést küld a Gemini API-nak várakozás és végtelen ciklus nélkül."""
+    """Egyetlen kötegelt kérést küld a Gemini API-nak, 503-as szervercsúcs esetén rövid újrapróbálkozással."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
@@ -188,28 +189,33 @@ def call_gemini_single_batch(prompt):
     last_err = None
 
     for use_vertex in modes_to_try:
-        try:
-            if use_vertex:
-                client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
-            else:
-                client = genai.Client(api_key=GEMINI_API_KEY)
+        for attempt in range(3):
+            try:
+                if use_vertex:
+                    client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
+                else:
+                    client = genai.Client(api_key=GEMINI_API_KEY)
 
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
-            )
-            return response.text or ""
-        except Exception as e:
-            last_err = e
-            err_upper = str(e).upper()
-            if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
+                response = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=prompt,
+                )
+                return response.text or ""
+            except Exception as e:
+                last_err = e
+                err_upper = str(e).upper()
+                if "503" in err_upper or "UNAVAILABLE" in err_upper:
+                    if attempt < 2:
+                        time.sleep(3)
+                        continue
+                    raise e
+                if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
+                    raise e
+                if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403"]):
+                    break
                 raise e
-            if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403"]):
-                continue
-            raise e
 
     raise last_err
-
 
 def get_gspread_client():
     """Hitelesített Google Sheets kliens létrehozása."""
