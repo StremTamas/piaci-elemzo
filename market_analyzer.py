@@ -197,24 +197,27 @@ def call_gemini_single_batch(prompt):
                 else:
                     client = genai.Client(api_key=GEMINI_API_KEY)
 
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=prompt,
-                )
-                return response.text or ""
-            except Exception as e:
-                last_err = e
-                err_upper = str(e).upper()
-                if "503" in err_upper or "UNAVAILABLE" in err_upper:
-                    if attempt < 2:
-                        time.sleep(3)
-                        continue
-                    raise e
-                if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
-                    raise e
-                if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403"]):
-                    break
-                raise e
+               for model_name in ["gemini-3.8-flash"]:  # Ide vesszővel felvehetsz egy második aktív modellt is
+                for attempt in range(3):
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                        )
+                        return response.text or ""
+                    except Exception as e:
+                        last_err = e
+                        err_upper = str(e).upper()
+                        if "503" in err_upper or "UNAVAILABLE" in err_upper:
+                            if attempt < 2:
+                                time.sleep(4 * (attempt + 1))  # 4 mp, majd 8 mp várakozás
+                                continue
+                            break  # 3 sikertelen próba után lépjen tovább a külső ciklusban
+                        if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
+                            break  # Kvótahibánál is engedje tovább a következő kulcsra/modellre
+                        if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403"]):
+                            break
+                        raise e
 
     raise last_err
 
