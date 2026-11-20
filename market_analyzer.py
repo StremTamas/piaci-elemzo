@@ -190,27 +190,27 @@ def _send_gemini_request(client, model_name, prompt):
 
 
 def call_gemini_single_batch(prompt):
-    """Egyetlen kötegelt kérést küld az ingyenes Gemini API-nak, szigorú 20 mp-es időkorláttal."""
+    """Kötegelt kérést küld a Gemini API-nak tartalékmodell-váltással és 15 mp-es időkorláttal."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
     client = genai.Client(vertexai=False, api_key=GEMINI_API_KEY)
     last_err = None
 
-    # A lista második elemeként megadhatsz egy másik aktív modellnevet is a Google AI Studióból
-    for model_name in ["gemini-3.8-flash"]:
-        for attempt in range(3):
+    # Ha az elsődleges modell túlterhelt (503), azonnal átvált a tartalék modellre
+    for model_name in ["gemini-3.8-flash", "gemini-2.5-flash"]:
+        for attempt in range(2):
             executor = ThreadPoolExecutor(max_workers=1)
             future = executor.submit(_send_gemini_request, client, model_name, prompt)
             try:
-                result_text = future.result(timeout=20)
+                result_text = future.result(timeout=15)
                 executor.shutdown(wait=False)
                 return result_text
             except FuturesTimeoutError:
                 executor.shutdown(wait=False)
-                last_err = TimeoutError("A Gemini AI szerver 20 másodpercen belül nem válaszolt.")
-                if attempt < 2:
-                    time.sleep(2 * (attempt + 1))
+                last_err = TimeoutError(f"A modell ({model_name}) 15 másodpercen belül nem válaszolt.")
+                if attempt == 0:
+                    time.sleep(2)
                     continue
                 break
             except Exception as e:
@@ -218,12 +218,12 @@ def call_gemini_single_batch(prompt):
                 last_err = e
                 err_upper = str(e).upper()
                 if "503" in err_upper or "UNAVAILABLE" in err_upper:
-                    if attempt < 2:
-                        time.sleep(2 * (attempt + 1))  # 2 mp, majd 4 mp várakozás
+                    if attempt == 0:
+                        time.sleep(2)
                         continue
-                    break
+                    break  # Lépjen tovább a következő modellre
                 if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
-                    break
+                    break  # Kvótahibánál is próbálja meg a tartalék modellt
                 if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404", "NOT_FOUND"]):
                     break
                 raise e
@@ -1194,10 +1194,20 @@ if needs_refresh:
 data, fx_map, last_updated, log_ok, log_msg, ai_err = st.session_state["cached_payload"]["payload"]
 
 if ai_err:
-    if "429" in ai_err or "RESOURCE_EXHAUSTED" in ai_err.upper():
+    if "get_shared_analysis" in globals():
+        get_shared_analysis.clear()
+    st.session_state.pop("cached_payload", None)
+
+    err_u = ai_err.upper()
+    if "429" in err_u or "RESOURCE_EXHAUSTED" in err_u:
         st.info(
-            "ℹ️ **Ingyenes AI napi kvótalimit elérve:** A program automatikusan az egységesített "
-            "SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján értékelte az eszközöket."
+            "ℹ️ **AI napi/perces kvótalimit elérve:** A portfólió automatikusan az egységesített "
+            "SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján értékelve jelenik meg."
+        )
+    elif "503" in err_u or "UNAVAILABLE" in err_u or "TIMEOUT" in err_u:
+        st.info(
+            "ℹ️ **Az AI szerver átmenetileg túlterhelt:** A portfólió automatikusan az egységesített "
+            "SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján értékelve jelenik meg."
         )
     else:
         st.warning(f"⚠️ **AI kiegészítő megjegyzés** (szabályalapú mód aktív): `{ai_err}`")
