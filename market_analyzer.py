@@ -190,15 +190,16 @@ def _send_gemini_request(client, model_name, prompt):
 
 
 def call_gemini_single_batch(prompt):
-    """Egyetlen kötegelt kérést küld a Gemini API-nak, szigorú 20 mp-es időkorláttal."""
+    """Egyetlen kötegelt kérést küld az ingyenes Gemini API-nak, szigorú 20 mp-es időkorláttal."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
     client = genai.Client(vertexai=False, api_key=GEMINI_API_KEY)
     last_err = None
 
+    # A lista második elemeként megadhatsz egy másik aktív modellnevet is a Google AI Studióból
     for model_name in ["gemini-3.8-flash"]:
-        for attempt in range(2):
+        for attempt in range(3):
             executor = ThreadPoolExecutor(max_workers=1)
             future = executor.submit(_send_gemini_request, client, model_name, prompt)
             try:
@@ -208,8 +209,8 @@ def call_gemini_single_batch(prompt):
             except FuturesTimeoutError:
                 executor.shutdown(wait=False)
                 last_err = TimeoutError("A Gemini AI szerver 20 másodpercen belül nem válaszolt.")
-                if attempt == 0:
-                    time.sleep(2)
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
                     continue
                 break
             except Exception as e:
@@ -217,8 +218,8 @@ def call_gemini_single_batch(prompt):
                 last_err = e
                 err_upper = str(e).upper()
                 if "503" in err_upper or "UNAVAILABLE" in err_upper:
-                    if attempt == 0:
-                        time.sleep(3)
+                    if attempt < 2:
+                        time.sleep(2 * (attempt + 1))  # 2 mp, majd 4 mp várakozás
                         continue
                     break
                 if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
