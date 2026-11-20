@@ -194,46 +194,38 @@ def call_gemini_single_batch(prompt):
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
-    # Először mindig a standard Generative Language API-t használja (nem a Vertex AI-t)
-    modes_to_try = [False, True] if GEMINI_API_KEY.startswith("AQ.") else [False]
+    client = genai.Client(api_key=GEMINI_API_KEY)
     last_err = None
 
-    for use_vertex in modes_to_try:
-        client = (
-            genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
-            if use_vertex
-            else genai.Client(api_key=GEMINI_API_KEY)
-        )
-
-        for model_name in ["gemini-3.8-flash"]:
-            for attempt in range(2):
-                executor = ThreadPoolExecutor(max_workers=1)
-                future = executor.submit(_send_gemini_request, client, model_name, prompt)
-                try:
-                    result_text = future.result(timeout=20)
-                    executor.shutdown(wait=False)
-                    return result_text
-                except FuturesTimeoutError:
-                    executor.shutdown(wait=False)
-                    last_err = TimeoutError("A Gemini AI szerver 20 másodpercen belül nem válaszolt.")
+    for model_name in ["gemini-3.8-flash"]:
+        for attempt in range(2):
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_send_gemini_request, client, model_name, prompt)
+            try:
+                result_text = future.result(timeout=20)
+                executor.shutdown(wait=False)
+                return result_text
+            except FuturesTimeoutError:
+                executor.shutdown(wait=False)
+                last_err = TimeoutError("A Gemini AI szerver 20 másodpercen belül nem válaszolt.")
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                break
+            except Exception as e:
+                executor.shutdown(wait=False)
+                last_err = e
+                err_upper = str(e).upper()
+                if "503" in err_upper or "UNAVAILABLE" in err_upper:
                     if attempt == 0:
-                        time.sleep(2)
+                        time.sleep(3)
                         continue
                     break
-                except Exception as e:
-                    executor.shutdown(wait=False)
-                    last_err = e
-                    err_upper = str(e).upper()
-                    if "503" in err_upper or "UNAVAILABLE" in err_upper:
-                        if attempt == 0:
-                            time.sleep(3)
-                            continue
-                        break
-                    if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
-                        break
-                    if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404", "NOT_FOUND", "SERVICE_DISABLED"]):
-                        break
-                    raise e
+                if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
+                    break
+                if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404", "NOT_FOUND"]):
+                    break
+                raise e
 
     if last_err is not None:
         raise last_err
@@ -1147,10 +1139,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_shared_analysis():
+    """1 órán át szerverszinten tárolja az eredményt, így sem a frissítés, sem a megosztás nem fogyaszt új kvótát."""
+    return run_full_analysis_with_progress()
+
+
 with st.sidebar:
     st.markdown("### ⚡ Vezérlőpult")
     if st.button("🔄 Frissítés most (Élő adat)", use_container_width=True):
-        st.session_state.pop("cached_payload", None)
+        get_shared_analysis.clear()
         st.rerun()
 
     st.markdown("---")
@@ -1169,6 +1167,11 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Hiba a küldéskor: {e}")
 
+try:
+    data, fx_map, last_updated, log_ok, log_msg, ai_err = get_shared_analysis()
+except Exception as e:
+    st.error(f"Hiba az adatok betöltésekor: {e}")
+    st.stop()
 now_dt = datetime.now()
 cached = st.session_state.get("cached_payload")
 needs_refresh = (
