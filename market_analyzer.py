@@ -1174,36 +1174,11 @@ with st.sidebar:
     icon_b64 = get_icon_base64()
     if icon_b64:
         st.markdown(
-            f"""
-            <div style="
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                padding: 10px 12px;
-                margin-bottom: 14px;
-                background: linear-gradient(135deg, #1E1E24 0%, #2B2D38 100%);
-                border: 1px solid rgba(255, 107, 0, 0.35);
-                border-left: 4px solid #FF6B00;
-                border-radius: 6px;
-            ">
-                <img src="data:image/png;base64,{icon_b64}" style="
-                    width: 48px;
-                    height: 48px;
-                    border-radius: 6px;
-                    border: 1px solid rgba(255, 107, 0, 0.5);
-                    object-fit: cover;
-                    flex-shrink: 0;
-                " />
-                <div>
-                    <div style="font-family: 'Exo 2', sans-serif; font-weight: 800; font-size: 0.96rem; color: #FFFFFF; letter-spacing: 0.03em; line-height: 1.2;">
-                        AI PIACI IRÁNYTŰ
-                    </div>
-                    <div style="font-family: 'Plus Jakarta Sans', sans-serif; font-size: 0.72rem; color: #CBD5E1; margin-top: 2px;">
-                        Portfólió &amp; Deviza Radar
-                    </div>
-                </div>
-            </div>
-            """,
+            f"""<div style="display: flex; flex-direction: column; align-items: center; text-align: center; padding: 14px 12px 12px 12px; margin-bottom: 16px; background: linear-gradient(135deg, #1E1E24 0%, #2B2D38 100%); border: 1px solid rgba(255, 107, 0, 0.35); border-left: 4px solid #FF6B00; border-radius: 8px;">
+<img src="data:image/png;base64,{icon_b64}" style="width: 100%; max-width: 185px; aspect-ratio: 1 / 1; border-radius: 8px; border: 1px solid rgba(255, 107, 0, 0.55); object-fit: cover; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);" />
+<div style="margin-top: 11px; font-family: 'Exo 2', sans-serif; font-weight: 800; font-size: 1.05rem; color: #FFFFFF; letter-spacing: 0.04em; line-height: 1.2;">AI PIACI IRÁNYTŰ</div>
+<div style="font-family: 'Plus Jakarta Sans', sans-serif; font-size: 0.76rem; color: #CBD5E1; margin-top: 3px;">Portfólió &amp; Deviza Radar</div>
+</div>""",
             unsafe_allow_html=True,
         )
 
