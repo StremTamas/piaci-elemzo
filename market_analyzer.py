@@ -181,7 +181,7 @@ SCOPES = [
 
 
 def call_gemini_single_batch(prompt):
-    """Egyetlen kötegelt kérést küld a Gemini API-nak, 503-as szervercsúcs esetén rövid újrapróbálkozással."""
+    """Egyetlen kötegelt kérést küld a Gemini API-nak, 503-as szervercsúcs esetén fokozatos újrapróbálkozással."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
@@ -190,36 +190,40 @@ def call_gemini_single_batch(prompt):
     last_err = None
 
     for use_vertex in modes_to_try:
-        for attempt in range(3):
-            try:
-                if use_vertex:
-                    client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
-                else:
-                    client = genai.Client(api_key=GEMINI_API_KEY)
+        try:
+            if use_vertex:
+                client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
+            else:
+                client = genai.Client(api_key=GEMINI_API_KEY)
+        except Exception as e:
+            last_err = e
+            continue
 
-               for model_name in ["gemini-3.8-flash"]:  # Ide vesszővel felvehetsz egy második aktív modellt is
-                for attempt in range(3):
-                    try:
-                        response = client.models.generate_content(
-                            model=model_name,
-                            contents=prompt,
-                        )
-                        return response.text or ""
-                    except Exception as e:
-                        last_err = e
-                        err_upper = str(e).upper()
-                        if "503" in err_upper or "UNAVAILABLE" in err_upper:
-                            if attempt < 2:
-                                time.sleep(4 * (attempt + 1))  # 4 mp, majd 8 mp várakozás
-                                continue
-                            break  # 3 sikertelen próba után lépjen tovább a külső ciklusban
-                        if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
-                            break  # Kvótahibánál is engedje tovább a következő kulcsra/modellre
-                        if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403"]):
-                            break
-                        raise e
+        for model_name in ["gemini-3.8-flash"]:  # Ide vesszővel felvehetsz egy második aktív modellt is
+            for attempt in range(3):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                    )
+                    return response.text or ""
+                except Exception as e:
+                    last_err = e
+                    err_upper = str(e).upper()
+                    if "503" in err_upper or "UNAVAILABLE" in err_upper:
+                        if attempt < 2:
+                            time.sleep(4 * (attempt + 1))  # 4 mp, majd 8 mp várakozás
+                            continue
+                        break  # 3 sikertelen próba után lépjen tovább a külső ciklusban
+                    if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
+                        break  # Kvótahibánál is lépjen tovább a következő modellre/módra
+                    if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404", "NOT_FOUND"]):
+                        break
+                    raise e
 
-    raise last_err
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("Nem sikerült kapcsolódni a Gemini API-hoz.")
 
 
 def get_gspread_client():
@@ -963,10 +967,10 @@ def render_technical_learning_panel(tech, currency="USD", fx_map=None):
     with st.expander("📘 Döntési mátrix puska: Mikor vételi jel az RSI < 30, és hogyan számít a deviza?"):
         st.markdown(
             """
-            * **Emelkedő főtrend (`Ár > SMA 200`) + Alacsony RSI (`< 35`):** Egészséges trendben átmeneti visszaesés → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI**. Ha közben az adott eszköz devizájához képest erős a forint, dupla előny (olcsó részvény + olcsó deviza).
-            * **Megtört főtrend (`Ár < SMA 200`) + Alacsony RSI (`< 32`) – „Hulló kés”:** Eladni a pánik alján már késő (**Meglévő: TARTÁS**), de új pénzzel meg kell várni, amíg az RSI visszafordul **35 fölé**, és tisztulnak a hírek (**Új vétel: KIVÁRÁS**). Az erős forint önmagában **nem** indokol részvényvételt.
-            * **Tartós eső trend (`Ár < SMA 50 < SMA 200`) + Nem túladott RSI (`≥ 32`):** A felpattanások kockázatcsökkentésre valók → **RÉSZLEGES KITÁRAZÁS / Új vétel: KERÜLENDŐ**.
-            * **Túlvett piac (`RSI > 70`):** Rövid távon túlhevült → **Új vétel: KIVÁRÁS**, devizás eszköznél gyenge forint mellett (az adott EUR/HUF vagy USD/HUF sáv tetején) **RÉSZLEGES KITÁRAZÁS**.
+- **Emelkedő főtrend (`Ár > SMA 200`) + Alacsony RSI (`< 35`):** Egészséges trendben átmeneti visszaesés → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI**. Ha közben az adott eszköz devizájához képest erős a forint, dupla előny (olcsó részvény + olcsó deviza).
+- **Megtört főtrend (`Ár < SMA 200`) + Alacsony RSI (`< 32`) – „Hulló kés”:** Eladni a pánik alján már késő (**Meglévő: TARTÁS**), de új pénzzel meg kell várni, amíg az RSI visszafordul **35 fölé**, és tisztulnak a hírek (**Új vétel: KIVÁRÁS**). Az erős forint önmagában **nem** indokol részvényvételt.
+- **Tartós eső trend (`Ár < SMA 50 < SMA 200`) + Nem túladott RSI (`≥ 32`):** A felpattanások kockázatcsökkentésre valók → **RÉSZLEGES KITÁRAZÁS / Új vétel: KERÜLENDŐ**.
+- **Túlvett piac (`RSI > 70`):** Rövid távon túlhevült → **Új vétel: KIVÁRÁS**, devizás eszköznél gyenge forint mellett (az adott EUR/HUF vagy USD/HUF sáv tetején) **RÉSZLEGES KITÁRAZÁS**.
             """
         )
 
