@@ -1129,7 +1129,7 @@ st.markdown(
     """
     <div class="main-banner">
         <h1>🔥 AI PIACI IRÁNYTŰ</h1>
-        <p>Gyors portfólió-döntéstámogató • Magyar blue chipek, VIG alapok & EUR/USD/HUF hatás</p>
+        <p>Gyors portfólió-döntéstámogató • Magyar blue chipek, nemzetközi eszközök, VIG alapok & EUR/USD/HUF hatás</p>
     </div>
     """,
     unsafe_allow_html=True,
