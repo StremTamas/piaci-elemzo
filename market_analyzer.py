@@ -6,6 +6,7 @@ from google import genai
 import pandas as pd
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -180,51 +181,59 @@ SCOPES = [
 ]
 
 
+def _send_gemini_request(client, model_name, prompt):
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+    )
+    return response.text or ""
+
+
 def call_gemini_single_batch(prompt):
-    """Egyetlen kötegelt kérést küld a Gemini API-nak, 503-as szervercsúcs esetén fokozatos újrapróbálkozással."""
+    """Egyetlen kötegelt kérést küld a Gemini API-nak, szigorú 20 mp-es időkorláttal."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
-    primary_vertex = GEMINI_API_KEY.startswith("AQ.")
-    modes_to_try = [primary_vertex, not primary_vertex]
+    use_vertex = GEMINI_API_KEY.startswith("AQ.")
+    if use_vertex:
+        client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
+    else:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
     last_err = None
-
-    for use_vertex in modes_to_try:
-        try:
-            if use_vertex:
-                client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
-            else:
-                client = genai.Client(api_key=GEMINI_API_KEY)
-        except Exception as e:
-            last_err = e
-            continue
-
-        for model_name in ["gemini-3.8-flash"]:  # Ide vesszővel felvehetsz egy második aktív modellt is
-            for attempt in range(3):
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                    )
-                    return response.text or ""
-                except Exception as e:
-                    last_err = e
-                    err_upper = str(e).upper()
-                    if "503" in err_upper or "UNAVAILABLE" in err_upper:
-                        if attempt < 2:
-                            time.sleep(4 * (attempt + 1))  # 4 mp, majd 8 mp várakozás
-                            continue
-                        break  # 3 sikertelen próba után lépjen tovább a külső ciklusban
-                    if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
-                        break  # Kvótahibánál is lépjen tovább a következő modellre/módra
-                    if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404", "NOT_FOUND"]):
-                        break
-                    raise e
+    for model_name in ["gemini-3.8-flash"]:
+        for attempt in range(2):
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_send_gemini_request, client, model_name, prompt)
+            try:
+                result_text = future.result(timeout=20)
+                executor.shutdown(wait=False)
+                return result_text
+            except FuturesTimeoutError:
+                executor.shutdown(wait=False)
+                last_err = TimeoutError("A Gemini AI szerver 20 másodpercen belül nem válaszolt.")
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                break
+            except Exception as e:
+                executor.shutdown(wait=False)
+                last_err = e
+                err_upper = str(e).upper()
+                if "503" in err_upper or "UNAVAILABLE" in err_upper:
+                    if attempt == 0:
+                        time.sleep(3)
+                        continue
+                    break
+                if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
+                    break
+                if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404", "NOT_FOUND"]):
+                    break
+                raise e
 
     if last_err is not None:
         raise last_err
     raise RuntimeError("Nem sikerült kapcsolódni a Gemini API-hoz.")
-
 
 def get_gspread_client():
     """Hitelesített Google Sheets kliens létrehozása."""
