@@ -194,7 +194,7 @@ def call_gemini_single_batch(prompt):
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(vertexai=False, api_key=GEMINI_API_KEY)
     last_err = None
 
     for model_name in ["gemini-3.8-flash"]:
