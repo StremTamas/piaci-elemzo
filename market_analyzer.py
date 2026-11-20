@@ -373,15 +373,22 @@ def _fetch_single_fx_pair(ticker_symbol, pair_label):
         low_1y = float(close.min())
         high_1y = float(close.max())
         pos_pct = ((rate - low_1y) / (high_1y - low_1y) * 100) if high_1y > low_1y else 50.0
+        base_curr = pair_label.split("/")[0]
 
         if pos_pct >= 75:
-            regime_short = "Gyenge HUF zóna (éves csúcs közelében – profitrealizálásra kedvező)"
+            regime_short = (
+                f"Erős {base_curr} / Gyenge HUF zóna "
+                f"(drága {base_curr} – profitrealizálásra kedvező, HUF-ból vételre drága)"
+            )
             zone_tag = "WEAK_HUF"
         elif pos_pct <= 25:
-            regime_short = "Erős HUF zóna (éves mélypont közelében – devizaváltásra kedvező)"
+            regime_short = (
+                f"Gyenge {base_curr} / Erős HUF zóna "
+                f"(olcsó {base_curr} – devizaváltásra és új vételre kedvező)"
+            )
             zone_tag = "STRONG_HUF"
         else:
-            regime_short = "Középmezőnyben mozgó forintárfolyam"
+            regime_short = f"Semleges {pair_label} zóna (középmezőnyben mozgó árfolyam)"
             zone_tag = "NEUTRAL_HUF"
 
         return {
@@ -694,9 +701,15 @@ def evaluate_technical_matrix(tech, currency="USD", fx_map=None):
             new_act = "ÉRDEMES VENNI"
             score = 84 if strong_huf else 78
             if strong_huf and relevant_fx:
-                fx_extra = f" Ráadásul az {relevant_fx['pair']} ({relevant_fx['rate']:.2f} Ft) erős forint zónában jár, így a devizaváltás is kedvező."
+                fx_extra = (
+                    f" Ráadásul Gyenge {currency} / Erős HUF ({relevant_fx['rate']:.2f} Ft) zóna van, "
+                    "így a devizaváltás is olcsó."
+                )
             elif weak_huf and relevant_fx:
-                fx_extra = f" Megjegyzés: az {relevant_fx['pair']} ({relevant_fx['rate']:.2f} Ft) gyenge forint zónában van, így forintból váltva drágább a deviza."
+                fx_extra = (
+                    f" Figyelem: Erős {currency} / Gyenge HUF ({relevant_fx['rate']:.2f} Ft) zóna miatt "
+                    f"drága a {currency}, így forintból váltva kedvezőtlenebb a devizahatás."
+                )
             else:
                 fx_extra = ""
             reason = (
@@ -708,7 +721,7 @@ def evaluate_technical_matrix(tech, currency="USD", fx_map=None):
             if weak_huf and relevant_fx:
                 existing_act = "RÉSZLEGES KITÁRAZÁS"
                 reason = (
-                    f"Túlvett RSI ({rsi:.1f}) mellett az {relevant_fx['pair']} ({relevant_fx['rate']:.2f} Ft) gyenge forint zónában (éves csúcs közelében) jár: "
+                    f"Túlvett RSI ({rsi:.1f}) mellett Erős {currency} / Gyenge HUF ({relevant_fx['rate']:.2f} Ft) zónában jár az árfolyam: "
                     "kedvező alkalom részleges profitrealizálásra forintra, új vétellel kivárni."
                 )
             else:
@@ -725,12 +738,19 @@ def evaluate_technical_matrix(tech, currency="USD", fx_map=None):
             new_act = "KIVÁRÁS"
             score = 68 if trend_state == "UP_STRONG" else 58
             if strong_huf and relevant_fx:
-                fx_extra = f" (Az erős forint miatt {relevant_fx['pair']} devizát előre váltani kedvező, de a részvényvétellel érdemes támaszra várni.)"
+                fx_extra = (
+                    f" (A Gyenge {currency} / Erős HUF árfolyam miatt devizát előre váltani kedvező, "
+                    "de a részvényvétellel érdemes támaszra várni.)"
+                )
+            elif weak_huf and relevant_fx:
+                fx_extra = (
+                    f" (Ráadásul Erős {currency} / Gyenge HUF zóna miatt forintból váltani most drága.)"
+                )
             else:
                 fx_extra = ""
             reason = (
-                "Az emelkedő főtrend ép és az RSI semleges tartományban mozog: "
-                f"meglévő pozíciót érdemes tartani, új vásárlással pedig egy támasz tesztelésére várni.{fx_extra}"
+                "Az emelkedő főtrend ép, de az RSI semleges tartományban mozog (nincs túladott diszkont): "
+                f"meglévő pozíciót érdemes tartani, új vásárlással pedig kivárni.{fx_extra}"
             )
             matrix_note = "🎯 **Kombinált döntés (Emelkedő trend + Semleges RSI):** Meglévő pozícióra **TARTÁS**, új vételre **KIVÁRÁS**."
 
@@ -880,22 +900,26 @@ def analyze_all_assets_batch(raw_items, fx_map):
 Gyakorlatias, kockázattudatos befektetési tanácsadóként viselkedsz egy magyar befektető számára.
 Elemezd az alábbi összes portfólióeszközt EGYETLEN válaszban.
 
---- DEVIZAKÖRNYEZET (SAJÁT DEVIZÁHOZ IGAZÍTVA) ---
+--- DEVIZAKÖRNYEZET ÉS ÉRTELMEZÉSE (NAGYON FONTOS!) ---
 - EUR eszközökhöz: {eur_summary}
 - USD eszközökhöz: {usd_summary}
 - HUF eszközökhöz: devizahatás nem értelmezhető, kizárólag a saját trendre és hírekre fókuszálj.
+- DEVIZA-SZABÁLY:
+  * "Erős USD / Gyenge HUF" (vagy "Erős EUR / Gyenge HUF") = a deviza DRÁGA forintban nézve! Ez ELADÁSRA / profitrealizálásra kedvező, de forintból történő ÚJ VÉTELRE KEDVEZŐTLEN (drága deviza). Soha ne írd ilyenkor, hogy a deviza gyenge vagy kedvez a vételnek!
+  * "Gyenge USD / Erős HUF" (vagy "Gyenge EUR / Erős HUF") = a deviza OLCSÓ forintban nézve! Ez kedvez az új devizaváltásnak és vételnek.
 
---- DÖNTÉSI SZABÁLYOK (SZIGORÚAN TARTSD BE) ---
-1. Emelkedő trendben (Ár > SMA 200) és alacsony RSI (< 35) mellett: Meglévő = "HÍGÍTÁS (DCA)", Új vétel = "ÉRDEMES VENNI". (Ha az adott eszköz devizájában erős a forint, említsd meg a kedvező devizaváltási lehetőséget is.)
-2. Megtört főtrendben (Ár < SMA 200) és alacsony RSI (< 32) mellett ("hulló kés"): pánikból eladni már késő (Meglévő = "TARTÁS"), de új vételhez meg kell várni az RSI 35 fölé fordulását és a hírek tisztázódását (Új vétel = "KIVÁRÁS"). Erős forint önmagában NEM indokol vételt!
-3. Tartós csökkenő trendben (Ár < SMA 50 < SMA 200) és nem túladott RSI (>= 32) mellett: Meglévő = "RÉSZLEGES KITÁRAZÁS", Új vétel = "KERÜLENDŐ".
-4. Túlvett RSI (> 70) esetén: ha az adott eszköz saját devizája (EUR vagy USD) gyenge forint zónában van, javasolj "RÉSZLEGES KITÁRAZÁS"-t forintra, különben "TARTÁS"-t; új vételre mindenképp "KIVÁRÁS"-t.
+--- DÖNTÉSI SZABÁLYOK (SZIGORÚAN TARTSD BE MIND az 5 PONTOT!) ---
+1. Emelkedő trendben (Ár > SMA 200) ÉS alacsony RSI (< 35) mellett: Meglévő = "HÍGÍTÁS (DCA)", Új vétel = "ÉRDEMES VENNI". (Jelezd a devizahatást: Gyenge USD/EUR esetén olcsó a váltás; Erős USD/EUR esetén figyelmeztess, hogy a deviza drága.)
+2. Emelkedő trendben (Ár > SMA 200) ÉS semleges vagy emelkedett RSI (35 <= RSI <= 70) mellett: Meglévő = "TARTÁS", Új vétel = "KIVÁRÁS". Kisebb napi/heti visszahúzódás önmagában NEM indokol vételt vagy hígítást, amíg az RSI 35 felett van!
+3. Megtört főtrendben (Ár < SMA 200) ÉS alacsony RSI (< 32) mellett ("hulló kés"): pánikból eladni már késő (Meglévő = "TARTÁS"), de új vételhez meg kell várni az RSI 35 fölé fordulását és a hírek tisztázódását (Új vétel = "KIVÁRÁS"). A Gyenge USD/EUR (erős forint) önmagában NEM indokol vételt!
+4. Tartós csökkenő trendben (Ár < SMA 50 < SMA 200) ÉS nem túladott RSI (>= 32) mellett: Meglévő = "RÉSZLEGES KITÁRAZÁS", Új vétel = "KERÜLENDŐ".
+5. Túlvett RSI (> 70) esetén: ha az adott eszköz devizájánál "Erős USD / Gyenge HUF" vagy "Erős EUR / Gyenge HUF" zóna van, javasolj "RÉSZLEGES KITÁRAZÁS"-t forintra, különben "TARTÁS"-t; új vételre mindenképp "KIVÁRÁS"-t.
 
 --- ESZKÖZÖK LISTÁJA ---
 {json.dumps(assets_payload, ensure_ascii=False)}
 
 Feladat minden egyes "id" kulcshoz:
-1. Dönts külön a MEGLÉVŐ pozícióról és az ÚJ vásárlásról a technikai adatok + hírek + az eszköz saját devizapárja alapján.
+1. Dönts külön a MEGLÉVŐ pozícióról és az ÚJ vásárlásról a fenti 5 szabály alapján.
 2. Fordítsd le magyarra a kapott angol/idegen nyelvű hírcímeket ("headlines").
 
 Válaszolj KIZÁRÓLAG érvényes JSON objektummal, ahol a legfelső szintű kulcsok az eszközök "id" értékei ("A0", "A1", ...), és minden eszköz alatt pontosan ezek a kulcsok szerepelnek:
@@ -903,7 +927,7 @@ Válaszolj KIZÁRÓLAG érvényes JSON objektummal, ahol a legfelső szintű kul
 - "new_entry_action": pontosan egy ezekből: "ÉRDEMES VENNI", "KIVÁRÁS", "KERÜLENDŐ"
 - "plain_tech_summary": 1 rövid magyar mondat szakszavak (RSI/SMA) nélkül arról, hol áll az árfolyam
 - "sentiment_score": egész szám 1 és 100 között
-- "reasoning": 2 tömör magyar mondat arról, miért ezt javaslod most (sződd bele a híreket és az eszköz saját devizahatását is)
+- "reasoning": 2 tömör magyar mondat arról, miért ezt javaslod most (sződd bele a híreket és a pontos "Erős/Gyenge USD/EUR" devizahatást is)
 - "translated_news": lista a lefordított hírcímekkel (ha nem volt hír, [])
 """
 
@@ -990,10 +1014,11 @@ def render_technical_learning_panel(tech, currency="USD", fx_map=None):
     with st.expander("📘 Döntési mátrix puska: Mikor vételi jel az RSI < 30, és hogyan számít a deviza?"):
         st.markdown(
             """
-- **Emelkedő főtrend (`Ár > SMA 200`) + Alacsony RSI (`< 35`):** Egészséges trendben átmeneti visszaesés → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI**. Ha közben az adott eszköz devizájához képest erős a forint, dupla előny (olcsó részvény + olcsó deviza).
-- **Megtört főtrend (`Ár < SMA 200`) + Alacsony RSI (`< 32`) – „Hulló kés”:** Eladni a pánik alján már késő (**Meglévő: TARTÁS**), de új pénzzel meg kell várni, amíg az RSI visszafordul **35 fölé**, és tisztulnak a hírek (**Új vétel: KIVÁRÁS**). Az erős forint önmagában **nem** indokol részvényvételt.
+- **Emelkedő főtrend (`Ár > SMA 200`) + Alacsony RSI (`< 35`):** Egészséges trendben átmeneti visszaesés → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI**. Ha közben **Gyenge USD/EUR (Erős HUF)** zóna van, dupla előny (olcsó részvény + olcsó deviza).
+- **Emelkedő főtrend (`Ár > SMA 200`) + Semleges RSI (`35–65`):** Egészséges trend, de még nincs diszkont → **Meglévő: TARTÁS**, **Új vétel: KIVÁRÁS**.
+- **Megtört főtrend (`Ár < SMA 200`) + Alacsony RSI (`< 32`) – „Hulló kés”:** Eladni a pánik alján már késő (**Meglévő: TARTÁS**), de új pénzzel meg kell várni, amíg az RSI visszafordul **35 fölé**, és tisztulnak a hírek (**Új vétel: KIVÁRÁS**). A Gyenge USD/EUR önmagában **nem** indokol részvényvételt.
 - **Tartós eső trend (`Ár < SMA 50 < SMA 200`) + Nem túladott RSI (`≥ 32`):** A felpattanások kockázatcsökkentésre valók → **RÉSZLEGES KITÁRAZÁS / Új vétel: KERÜLENDŐ**.
-- **Túlvett piac (`RSI > 70`):** Rövid távon túlhevült → **Új vétel: KIVÁRÁS**, devizás eszköznél gyenge forint mellett (az adott EUR/HUF vagy USD/HUF sáv tetején) **RÉSZLEGES KITÁRAZÁS**.
+- **Túlvett piac (`RSI > 70`):** Rövid távon túlhevült → **Új vétel: KIVÁRÁS**, devizás eszköznél **Erős USD/EUR (Gyenge HUF)** zónában **RÉSZLEGES KITÁRAZÁS**.
             """
         )
 
@@ -1175,7 +1200,7 @@ with st.sidebar:
     if icon_b64:
         st.markdown(
             f"""<div style="display: flex; flex-direction: column; align-items: center; text-align: center; padding: 14px 12px 12px 12px; margin-bottom: 16px; background: linear-gradient(135deg, #1E1E24 0%, #2B2D38 100%); border: 1px solid rgba(255, 107, 0, 0.35); border-left: 4px solid #FF6B00; border-radius: 8px;">
-<img src="data:image/png;base64,{icon_b64}" style="width: 100%; max-width: 220px; aspect-ratio: 1 / 1; border-radius: 8px; border: 1px solid rgba(255, 107, 0, 0.55); object-fit: cover; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);" />
+<img src="data:image/png;base64,{icon_b64}" style="width: 100%; max-width: 185px; aspect-ratio: 1 / 1; border-radius: 8px; border: 1px solid rgba(255, 107, 0, 0.55); object-fit: cover; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);" />
 <div style="margin-top: 11px; font-family: 'Exo 2', sans-serif; font-weight: 800; font-size: 1.05rem; color: #FFFFFF; letter-spacing: 0.04em; line-height: 1.2;">AI PIACI IRÁNYTŰ</div>
 <div style="font-family: 'Plus Jakarta Sans', sans-serif; font-size: 0.76rem; color: #CBD5E1; margin-top: 3px;">Portfólió &amp; Deviza Radar</div>
 </div>""",
