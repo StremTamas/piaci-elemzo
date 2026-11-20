@@ -6,9 +6,9 @@ from google import genai
 import pandas as pd
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import smtplib
 import ssl
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
@@ -190,16 +190,15 @@ def _send_gemini_request(client, model_name, prompt):
 
 
 def call_gemini_single_batch(prompt):
-    """Kötegelt kérést küld a Gemini API-nak tartalékmodell-váltással és 15 mp-es időkorláttal."""
+    """Kötegelt kérést küld az ingyenes Gemini API-nak, 503-as terhelési csúcs esetén rövid újrapróbálkozással."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból.")
 
     client = genai.Client(vertexai=False, api_key=GEMINI_API_KEY)
     last_err = None
 
-    # Ha az elsődleges modell túlterhelt (503), azonnal átvált a tartalék modellre
-    for model_name in ["gemini-3.8-flash", "gemini-2.5-flash"]:
-        for attempt in range(2):
+    for model_name in ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]:
+        for attempt in range(3):
             executor = ThreadPoolExecutor(max_workers=1)
             future = executor.submit(_send_gemini_request, client, model_name, prompt)
             try:
@@ -209,8 +208,8 @@ def call_gemini_single_batch(prompt):
             except FuturesTimeoutError:
                 executor.shutdown(wait=False)
                 last_err = TimeoutError(f"A modell ({model_name}) 15 másodpercen belül nem válaszolt.")
-                if attempt == 0:
-                    time.sleep(2)
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
                     continue
                 break
             except Exception as e:
@@ -218,12 +217,12 @@ def call_gemini_single_batch(prompt):
                 last_err = e
                 err_upper = str(e).upper()
                 if "503" in err_upper or "UNAVAILABLE" in err_upper:
-                    if attempt == 0:
-                        time.sleep(2)
+                    if attempt < 2:
+                        time.sleep(2 * (attempt + 1))  # 2 mp, majd 4 mp várakozás
                         continue
-                    break  # Lépjen tovább a következő modellre
+                    break
                 if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
-                    break  # Kvótahibánál is próbálja meg a tartalék modellt
+                    break
                 if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404", "NOT_FOUND"]):
                     break
                 raise e
@@ -231,6 +230,8 @@ def call_gemini_single_batch(prompt):
     if last_err is not None:
         raise last_err
     raise RuntimeError("Nem sikerült kapcsolódni a Gemini API-hoz.")
+
+
 def get_gspread_client():
     """Hitelesített Google Sheets kliens létrehozása."""
     creds_dict = dict(st.secrets["gcp_service_account"])
@@ -1129,6 +1130,12 @@ def run_full_analysis_with_progress():
     return results, fx_map, run_timestamp, log_ok, log_msg, ai_err
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_shared_analysis():
+    """1 órán át szerverszinten tárolja az eredményt, így sem a frissítés, sem a megosztás nem fogyaszt új kvótát."""
+    return run_full_analysis_with_progress()
+
+
 # --- FELÜLET (UI) ---
 st.markdown(
     """
@@ -1139,12 +1146,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_shared_analysis():
-    """1 órán át szerverszinten tárolja az eredményt, így sem a frissítés, sem a megosztás nem fogyaszt új kvótát."""
-    return run_full_analysis_with_progress()
-
 
 with st.sidebar:
     st.markdown("### ⚡ Vezérlőpult")
@@ -1173,31 +1174,9 @@ try:
 except Exception as e:
     st.error(f"Hiba az adatok betöltésekor: {e}")
     st.stop()
-now_dt = datetime.now()
-cached = st.session_state.get("cached_payload")
-needs_refresh = (
-    cached is None
-    or (now_dt - cached["fetched_at"]) > timedelta(hours=1)
-)
-
-if needs_refresh:
-    try:
-        res_tuple = run_full_analysis_with_progress()
-        st.session_state["cached_payload"] = {
-            "fetched_at": now_dt,
-            "payload": res_tuple,
-        }
-    except Exception as e:
-        st.error(f"Hiba az adatok betöltésekor: {e}")
-        st.stop()
-
-data, fx_map, last_updated, log_ok, log_msg, ai_err = st.session_state["cached_payload"]["payload"]
 
 if ai_err:
-    if "get_shared_analysis" in globals():
-        get_shared_analysis.clear()
-    st.session_state.pop("cached_payload", None)
-
+    get_shared_analysis.clear()
     err_u = ai_err.upper()
     if "429" in err_u or "RESOURCE_EXHAUSTED" in err_u:
         st.info(
