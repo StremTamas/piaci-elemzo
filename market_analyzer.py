@@ -1,19 +1,29 @@
-import streamlit as st
-import gspread
-from google.oauth2.service_account import Credentials
-import yfinance as yf
-from google import genai
-import pandas as pd
+import base64
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from datetime import datetime, timedelta
+from email.message import EmailMessage
 import json
-import time
+from pathlib import Path
 import smtplib
 import ssl
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from email.message import EmailMessage
-from datetime import datetime, timedelta
+import time
+
+from google import genai
+from google.oauth2.service_account import Credentials
+import gspread
+import pandas as pd
+import streamlit as st
+import yfinance as yf
+
+# Ikon elérési útja (a market_analyzer.py mellett a repó gyökerében)
+ICON_PATH = Path(__file__).parent / "ikon.png"
 
 # Oldal beállítása
-st.set_page_config(page_title="AI Piaci Iránytű", page_icon="🔥", layout="wide")
+st.set_page_config(
+    page_title="AI Piaci Iránytű",
+    page_icon=str(ICON_PATH) if ICON_PATH.exists() else "🧭",
+    layout="wide",
+)
 
 # --- EGYEDI DIZÁJN: NARANCS SZÍNVILÁG & MODERN SZÖGLETES BETŰKÉSZLET ---
 st.markdown(
@@ -165,6 +175,13 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+def get_icon_base64():
+    """Base64 formátumba alakítja a logó ikont, ha megtalálható a repóban."""
+    if ICON_PATH.exists():
+        return base64.b64encode(ICON_PATH.read_bytes()).decode("utf-8")
+    return None
 
 
 def get_clean_gemini_key():
@@ -1140,7 +1157,13 @@ def get_shared_analysis():
 st.markdown(
     """
     <div class="main-banner">
-        <h1>🔥 AI PIACI IRÁNYTŰ</h1>
+        <h1 style="display: flex; align-items: center; gap: 12px;">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink: 0;">
+                <path d="M12 2L14.4 9.6L22 12L14.4 14.4L12 22L9.6 14.4L2 12L9.6 9.6L12 2Z" fill="#FF6B00"/>
+                <path d="M19 3L19.8 5.2L22 6L19.8 6.8L19 9L18.2 6.8L16 6L18.2 5.2L19 3Z" fill="#FF6B00" opacity="0.75"/>
+            </svg>
+            <span>AI PIACI IRÁNYTŰ</span>
+        </h1>
         <p>Gyors portfólió-döntéstámogató • Magyar blue chipek, nemzetközi eszközök, VIG alapok & EUR/USD/HUF hatás</p>
     </div>
     """,
@@ -1148,6 +1171,42 @@ st.markdown(
 )
 
 with st.sidebar:
+    icon_b64 = get_icon_base64()
+    if icon_b64:
+        st.markdown(
+            f"""
+            <div style="
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 10px 12px;
+                margin-bottom: 14px;
+                background: linear-gradient(135deg, #1E1E24 0%, #2B2D38 100%);
+                border: 1px solid rgba(255, 107, 0, 0.35);
+                border-left: 4px solid #FF6B00;
+                border-radius: 6px;
+            ">
+                <img src="data:image/png;base64,{icon_b64}" style="
+                    width: 48px;
+                    height: 48px;
+                    border-radius: 6px;
+                    border: 1px solid rgba(255, 107, 0, 0.5);
+                    object-fit: cover;
+                    flex-shrink: 0;
+                " />
+                <div>
+                    <div style="font-family: 'Exo 2', sans-serif; font-weight: 800; font-size: 0.96rem; color: #FFFFFF; letter-spacing: 0.03em; line-height: 1.2;">
+                        AI PIACI IRÁNYTŰ
+                    </div>
+                    <div style="font-family: 'Plus Jakarta Sans', sans-serif; font-size: 0.72rem; color: #CBD5E1; margin-top: 2px;">
+                        Portfólió &amp; Deviza Radar
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     st.markdown("### ⚡ Vezérlőpult")
     if st.button("🔄 Frissítés most (Élő adat)", use_container_width=True):
         get_shared_analysis.clear()
