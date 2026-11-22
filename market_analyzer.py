@@ -18,6 +18,45 @@ import yfinance as yf
 # Ikon elérési útja (a market_analyzer.py mellett a repó gyökerében)
 ICON_PATH = Path(__file__).parent / "ikon.png"
 
+# --- KÖZPONTI KATEGÓRIA- ÉS SZÍNKONFIGURÁCIÓ ---
+# Ha a kriptó színét metálkékről pinkre váltanád, írd át a "color" értéket "#EC4899"-re!
+CATEGORY_CONFIG = {
+    "STOCKS": {
+        "sheet_names": ["Eszkozok"],
+        "label": "Hagyományos tőzsde (Részvények)",
+        "short_label": "Részvény",
+        "icon": "📈",
+        "color": "#FF6B00",      # Narancs
+        "is_crypto": False,
+    },
+    "CRYPTO": {
+        "sheet_names": ["Kriptovaluták", "Kriptovalutak"],
+        "label": "Kriptovaluták",
+        "short_label": "Kriptó",
+        "icon": "🪙",
+        "color": "#0EA5E9",      # Metálkék (Pink alternatíva: "#EC4899")
+        "is_crypto": True,
+    },
+    "ETF": {
+        "sheet_names": ["ETF-ek", "ETF"],
+        "label": "ETF-ek",
+        "short_label": "ETF",
+        "icon": "🌐",
+        "color": "#10B981",      # Smaragdzöld
+        "is_crypto": False,
+    },
+    "FUNDS": {
+        "sheet_names": ["VIG_alapok", "VIG_Alapok"],
+        "label": "Befektetési jegyek (VIG alapok)",
+        "short_label": "Befektetési jegy",
+        "icon": "🏛️",
+        "color": "#E11D48",      # VIG-piros
+        "is_crypto": False,
+    },
+}
+
+CATEGORY_ORDER = ["STOCKS", "CRYPTO", "ETF", "FUNDS"]
+
 # Oldal beállítása
 st.set_page_config(
     page_title="AI Piaci Iránytű",
@@ -25,7 +64,15 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- EGYEDI DIZÁJN: NARANCS SZÍNVILÁG & MODERN SZÖGLETES BETŰKÉSZLET ---
+
+def hex_to_rgba(hex_color, alpha):
+    """HEX színkódból CSS rgba() értéket képez."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+# --- EGYEDI DIZÁJN: MODERN SZÖGLETES STÍLUS & KATEGÓRIASZÍNEK ---
 st.markdown(
     """
     <style>
@@ -71,19 +118,37 @@ st.markdown(
         line-height: 1.45;
     }
 
+    .category-banner {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 16px;
+        border-radius: 6px;
+        margin: 18px 0 12px 0;
+        font-family: 'Exo 2', sans-serif;
+        font-weight: 800;
+        font-size: 1.12rem;
+        letter-spacing: 0.02em;
+    }
+    .category-count {
+        font-family: 'Plus Jakarta Sans', sans-serif;
+        font-size: 0.80rem;
+        font-weight: 700;
+        padding: 2px 10px;
+        border-radius: 4px;
+    }
+
     .asset-header {
         display: flex;
         justify-content: space-between;
-        align-items: baseline;
-        border-bottom: 2px solid rgba(255, 107, 0, 0.25);
+        align-items: center;
         padding-bottom: 8px;
         margin-bottom: 12px;
     }
     .asset-name {
         font-family: 'Exo 2', sans-serif;
-        font-size: 1.22rem;
+        font-size: 1.20rem;
         font-weight: 800;
-        color: #FF6B00;
     }
     .asset-ticker {
         font-family: 'Exo 2', sans-serif;
@@ -91,6 +156,17 @@ st.markdown(
         font-weight: 600;
         opacity: 0.75;
         margin-left: 6px;
+    }
+    .cat-tag {
+        display: inline-block;
+        font-family: 'Exo 2', sans-serif;
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 2px 8px;
+        border-radius: 4px;
+        margin-bottom: 6px;
     }
 
     .decision-grid {
@@ -102,8 +178,8 @@ st.markdown(
     .decision-box {
         padding: 10px 12px;
         border-radius: 6px;
-        border-left: 4px solid #FF6B00;
-        background: rgba(255, 107, 0, 0.07);
+        border-left: 4px solid #F59E0B;
+        background: rgba(245, 158, 11, 0.08);
     }
     .decision-label {
         font-size: 0.72rem;
@@ -125,9 +201,9 @@ st.markdown(
         color: #059669;
     }
     .badge-hold {
-        border-left-color: #FF6B00 !important;
-        background: rgba(255, 107, 0, 0.12) !important;
-        color: #EA580C;
+        border-left-color: #F59E0B !important;
+        background: rgba(245, 158, 11, 0.12) !important;
+        color: #D97706;
     }
     .badge-sell {
         border-left-color: #EF4444 !important;
@@ -137,7 +213,7 @@ st.markdown(
 
     @media (prefers-color-scheme: dark) {
         .badge-buy { color: #34D399; }
-        .badge-hold { color: #FB923C; }
+        .badge-hold { color: #FBBF24; }
         .badge-sell { color: #F87171; }
     }
 
@@ -147,8 +223,6 @@ st.markdown(
         font-weight: 600;
         padding: 4px 10px;
         border-radius: 4px;
-        background: rgba(255, 107, 0, 0.12);
-        border: 1px solid rgba(255, 107, 0, 0.35);
         margin-bottom: 10px;
     }
 
@@ -235,7 +309,7 @@ def call_gemini_single_batch(prompt):
                 err_upper = str(e).upper()
                 if "503" in err_upper or "UNAVAILABLE" in err_upper:
                     if attempt < 2:
-                        time.sleep(2 * (attempt + 1))  # 2 mp, majd 4 mp várakozás
+                        time.sleep(2 * (attempt + 1))
                         continue
                     break
                 if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
@@ -254,6 +328,26 @@ def get_gspread_client():
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
+
+
+def find_worksheet_by_candidates(spreadsheet, candidate_names):
+    """Megkeresi a munkalapot pontos név vagy kis-/nagybetű-független egyezés alapján."""
+    try:
+        all_sheets = spreadsheet.worksheets()
+    except Exception:
+        return None
+
+    for cand in candidate_names:
+        for ws in all_sheets:
+            if ws.title.strip() == cand:
+                return ws
+
+    cand_lower = [c.lower() for c in candidate_names]
+    for ws in all_sheets:
+        if ws.title.strip().lower() in cand_lower:
+            return ws
+
+    return None
 
 
 @st.cache_resource
@@ -287,6 +381,8 @@ def check_and_send_alert(item):
     new_act = item.get("new_entry_action", "").upper()
     tech = item.get("tech") or {}
     rsi = tech.get("rsi_14")
+    cat_cfg = CATEGORY_CONFIG.get(item.get("category", "STOCKS"), CATEGORY_CONFIG["STOCKS"])
+    cat_color = cat_cfg["color"]
 
     triggers = []
     if "KITÁRAZÁS" in existing_act:
@@ -298,7 +394,7 @@ def check_and_send_alert(item):
     if not triggers:
         return False, None
 
-    alert_key = f"{item['name']}_{item['ticker']}_{'_'.join(triggers)}"
+    alert_key = f"{item['category']}_{item['name']}_{item['ticker']}_{'_'.join(triggers)}"
     history = get_alert_history()
     now = datetime.now()
 
@@ -309,10 +405,11 @@ def check_and_send_alert(item):
     price_str = f"{tech['price']:,.4f}" if tech.get("price") is not None else "N/A"
     change_str = f"{tech['change_pct']:+.2f}%" if tech.get("change_pct") is not None else "N/A"
 
-    subject = f"🔥 Piaci Jelzés: {item['name']} ({item['ticker']}) – {item['existing_action']}"
+    subject = f"🔥 Piaci Jelzés [{cat_cfg['short_label']}]: {item['name']} ({item['ticker']}) – {item['existing_action']}"
 
     plain_body = (
         f"Piaci jelzés érkezett:\n\n"
+        f"Kategória: {cat_cfg['label']}\n"
         f"Eszköz: {item['name']} ({item['ticker']})\n"
         f"Kiváltó ok: {trigger_text}\n"
         f"Aktuális ár: {price_str} ({change_str})\n"
@@ -324,8 +421,9 @@ def check_and_send_alert(item):
     html_body = f"""
     <html>
       <body style="font-family: Arial, sans-serif; color: #222; line-height: 1.5;">
-        <div style="border-left: 5px solid #FF6B00; padding-left: 14px;">
-          <h2 style="color: #FF6B00; margin-bottom: 4px;">🔥 {item['name']} ({item['ticker']})</h2>
+        <div style="border-left: 5px solid {cat_color}; padding-left: 14px;">
+          <div style="font-size: 12px; font-weight: bold; color: {cat_color}; text-transform: uppercase;">{cat_cfg['label']}</div>
+          <h2 style="color: {cat_color}; margin: 2px 0 4px 0;">🔥 {item['name']} ({item['ticker']})</h2>
           <p style="margin-top: 0;"><strong>Jelzés:</strong> {trigger_text}</p>
         </div>
         <table style="border-collapse: collapse; width: 100%; max-width: 520px; margin: 12px 0;">
@@ -356,7 +454,7 @@ def check_and_send_alert(item):
 
 
 def _fetch_single_fx_pair(ticker_symbol, pair_label):
-    """Lekéri egy konkrét devizapár (pl. EUR/HUF vagy USD/HUF) 1 éves pozícióját."""
+    """Lekéri egy konkrét devizapár (pl. EUR/HUF vagy USD/HUF) 1 éves pozícióját és devizafelárát."""
     try:
         hist = yf.Ticker(ticker_symbol).history(period="1y", interval="1d", timeout=10)
         if hist is None or hist.empty or "Close" not in hist:
@@ -370,15 +468,18 @@ def _fetch_single_fx_pair(ticker_symbol, pair_label):
         prev = float(close.iloc[-2])
         chg = ((rate - prev) / prev) * 100
         sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else rate
+        avg_1y = float(close.mean())
         low_1y = float(close.min())
         high_1y = float(close.max())
         pos_pct = ((rate - low_1y) / (high_1y - low_1y) * 100) if high_1y > low_1y else 50.0
+        premium_vs_low_pct = ((rate - low_1y) / low_1y * 100) if low_1y > 0 else 0.0
+        premium_vs_avg_pct = ((rate - avg_1y) / avg_1y * 100) if avg_1y > 0 else 0.0
         base_curr = pair_label.split("/")[0]
 
         if pos_pct >= 75:
             regime_short = (
                 f"Erős {base_curr} / Gyenge HUF zóna "
-                f"(drága {base_curr} – profitrealizálásra kedvező, HUF-ból vételre drága)"
+                f"(+{premium_vs_low_pct:.1f}% az 1 éves mélyponthoz képest)"
             )
             zone_tag = "WEAK_HUF"
         elif pos_pct <= 25:
@@ -396,7 +497,11 @@ def _fetch_single_fx_pair(ticker_symbol, pair_label):
             "rate": rate,
             "change_pct": chg,
             "sma50": sma50,
+            "low_1y": low_1y,
+            "high_1y": high_1y,
             "pos_pct": pos_pct,
+            "premium_vs_low_pct": premium_vs_low_pct,
+            "premium_vs_avg_pct": premium_vs_avg_pct,
             "zone_tag": zone_tag,
             "regime_short": regime_short,
             "summary": f"{pair_label}: {rate:.2f} Ft ({chg:+.2f}%) | 50n átlag: {sma50:.2f} Ft | {regime_short}",
@@ -413,23 +518,32 @@ def fetch_fx_context():
     }
 
 
-def get_active_assets_from_sheet(client):
-    """Beolvassa az 'IGEN' státuszú eszközöket az 'Eszkozok' munkalapról."""
-    sheet = client.open_by_key(st.secrets["SHEET_ID"]).worksheet("Eszkozok")
-    records = sheet.get_all_records()
+def get_ticker_assets_from_sheet(spreadsheet, category_key):
+    """Beolvassa az 'IGEN' státuszú ticker alapú eszközöket az adott kategória munkalapjáról."""
+    cfg = CATEGORY_CONFIG[category_key]
+    ws = find_worksheet_by_candidates(spreadsheet, cfg["sheet_names"])
+    if ws is None:
+        return []
 
-    return [
-        row for row in records
-        if str(row.get("aktiv", "")).strip().upper() == "IGEN" and row.get("ticker")
-    ]
+    records = ws.get_all_records()
+    items = []
+    for row in records:
+        if str(row.get("aktiv", "")).strip().upper() == "IGEN" and row.get("ticker"):
+            ticker = str(row["ticker"]).strip()
+            name = str(row.get("name", ticker)).strip() or ticker
+            items.append({
+                "name": name,
+                "ticker": ticker,
+                "category": category_key,
+            })
+    return items
 
 
-def get_vig_funds_from_sheet(client):
-    """Beolvassa a 'VIG_Alapok' munkalapról a rögzített VIG befektetési alapok árfolyamsorát."""
-    try:
-        spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
-        vig_sheet = spreadsheet.worksheet("VIG_Alapok")
-    except Exception:
+def get_vig_funds_from_sheet(spreadsheet):
+    """Beolvassa a 'VIG_alapok' munkalapról a rögzített VIG befektetési alapok árfolyamsorát."""
+    cfg = CATEGORY_CONFIG["FUNDS"]
+    vig_sheet = find_worksheet_by_candidates(spreadsheet, cfg["sheet_names"])
+    if vig_sheet is None:
         return []
 
     records = vig_sheet.get_all_records()
@@ -465,6 +579,7 @@ def get_vig_funds_from_sheet(client):
             "name": fund_name,
             "ticker": f"VIG ({info['currency']})",
             "currency": info["currency"],
+            "category": "FUNDS",
             "hist_df": df,
         })
 
@@ -505,6 +620,7 @@ def log_results_to_sheet(client, results, run_timestamp):
     rows_to_append = []
     for item in results:
         tech = item.get("tech") or {}
+        cat_short = CATEGORY_CONFIG.get(item.get("category", "STOCKS"), CATEGORY_CONFIG["STOCKS"])["short_label"]
         price_val = round(tech["price"], 4) if tech.get("price") is not None else ""
         change_val = round(tech["change_pct"], 2) if tech.get("change_pct") is not None else ""
         rsi_val = round(tech["rsi_14"], 2) if tech.get("rsi_14") is not None else ""
@@ -513,7 +629,7 @@ def log_results_to_sheet(client, results, run_timestamp):
 
         rows_to_append.append([
             run_timestamp,
-            item["name"],
+            f"[{cat_short}] {item['name']}",
             item["ticker"],
             price_val,
             change_val,
@@ -532,7 +648,7 @@ def log_results_to_sheet(client, results, run_timestamp):
 
 
 def calculate_technical_indicators(hist_df):
-    """Kiszámolja a 14 napos RSI-t, az 50/200 napos mozgóátlagot és előkészíti a grafikont."""
+    """Kiszámolja a 14 napos RSI-t, az 50/200 napos mozgóátlagot és az 52 hetes volatilitási sávot."""
     if hist_df is None or hist_df.empty or "Close" not in hist_df:
         return None
 
@@ -546,6 +662,18 @@ def calculate_technical_indicators(hist_df):
         change_pct = ((current_price - prev_close) / prev_close) * 100
     else:
         change_pct = 0.0
+
+    # 52 hetes (252 kereskedési napos) árfolyam-kilengés és évesített volatilitás
+    close_1y = close.tail(252)
+    low_52w = float(close_1y.min())
+    high_52w = float(close_1y.max())
+    range_52w_pct = ((high_52w - low_52w) / low_52w * 100) if low_52w > 0 else None
+
+    ann_vol_pct = None
+    if len(close_1y) >= 20:
+        daily_ret = close_1y.pct_change().dropna()
+        if len(daily_ret) >= 15:
+            ann_vol_pct = float(daily_ret.std() * (252 ** 0.5) * 100)
 
     sma_50_series = close.rolling(window=50).mean()
     sma_200_series = close.rolling(window=200).mean()
@@ -598,27 +726,61 @@ def calculate_technical_indicators(hist_df):
         "rsi_14": rsi_14,
         "sma_50": sma_50,
         "sma_200": sma_200,
+        "low_52w": low_52w,
+        "high_52w": high_52w,
+        "range_52w_pct": range_52w_pct,
+        "ann_vol_pct": ann_vol_pct,
         "trend": trend,
         "chart_df": chart_df,
     }
 
 
-def evaluate_technical_matrix(tech, currency="USD", fx_map=None):
+def evaluate_technical_matrix(tech, currency="USD", fx_map=None, category="STOCKS"):
     """
-    EGYSÉGES DÖNTÉSI MÁTRIX (Trend × RSI × Saját Devizapár):
-    Minden eszközt a saját devizaneméhez tartozó forintárfolyam (EUR/HUF vagy USD/HUF) alapján finomhangol.
+    KATEGÓRIA- ÉS VOLATILITÁSFÜGGŐ DÖNTÉSI MÁTRIX (Trend × RSI × Súlyozott Devizapár):
+    Kriptovalutáknál a magas éves volatilitás miatt a 10% körüli devizafelár másodlagos súlyt kap,
+    míg részvényeknél / ETF-eknél / alapoknál szigorúan beleszámít az új vétel elbírálásába.
     """
     fx_map = fx_map or {}
+    cat_cfg = CATEGORY_CONFIG.get(category, CATEGORY_CONFIG["STOCKS"])
+    is_crypto = cat_cfg.get("is_crypto", False)
+
     relevant_fx = fx_map.get(currency) if currency in ("EUR", "USD") else None
     zone_tag = relevant_fx.get("zone_tag") if relevant_fx else None
     weak_huf = zone_tag == "WEAK_HUF"
     strong_huf = zone_tag == "STRONG_HUF"
 
+    range_52w = tech.get("range_52w_pct") if tech else None
+    fx_prem = relevant_fx.get("premium_vs_low_pct", 0.0) if relevant_fx else 0.0
+    fx_to_swing_pct = (fx_prem / range_52w * 100) if (relevant_fx and range_52w and range_52w > 0) else None
+
+    # Devizahatás magyarázat kategória-súlyozással
     if relevant_fx:
-        fx_note = (
-            f"💱 **Devizahatás ({relevant_fx['pair']} = {relevant_fx['rate']:.2f} Ft):** "
-            f"{relevant_fx['regime_short']} (1 éves sáv {relevant_fx['pos_pct']:.0f}%-ánál)."
-        )
+        swing_info = ""
+        if range_52w is not None and fx_to_swing_pct is not None:
+            swing_info = (
+                f" Az eszköz 52 hetes mozgástere **{range_52w:.0f}%**, így a **{fx_prem:.1f}%-os** devizafelár "
+                f"ennek csak **{fx_to_swing_pct:.0f}%-a**."
+            )
+        if is_crypto and weak_huf:
+            fx_note = (
+                f"💱 **Devizahatás – Kriptó súlyozás ({relevant_fx['pair']} = {relevant_fx['rate']:.2f} Ft):** "
+                f"A {currency} ugyan magas ({fx_prem:+.1f}% az 1 éves mélyponthoz képest), de a kriptoeszköz nagy "
+                f"volatilitása és éves felpattanási potenciálja mellett ez **másodlagos tényező**."
+                f"{swing_info}"
+            )
+        elif weak_huf:
+            fx_note = (
+                f"💱 **Devizahatás – Magas súly ({relevant_fx['pair']} = {relevant_fx['rate']:.2f} Ft):** "
+                f"{relevant_fx['regime_short']} — hagyományos eszköznél ez érdemben drágítja az új HUF-alapú vételt."
+                f"{swing_info}"
+            )
+        else:
+            fx_note = (
+                f"💱 **Devizahatás ({relevant_fx['pair']} = {relevant_fx['rate']:.2f} Ft):** "
+                f"{relevant_fx['regime_short']} (1 éves sáv {relevant_fx['pos_pct']:.0f}%-ánál)."
+                f"{swing_info}"
+            )
     elif currency == "HUF":
         fx_note = "💱 **Devizahatás (HUF):** Forintos eszköz, devizaváltási árfolyamhatás nem érinti."
     else:
@@ -694,21 +856,26 @@ def evaluate_technical_matrix(tech, currency="USD", fx_map=None):
         rsi_badge = "Semleges (35–65)"
         rsi_note = f"🔵 **Rövid távú lendület (RSI = {rsi:.1f}):** 35 és 65 közötti kiegyensúlyozott tartomány."
 
-    # 3. Kombinált mátrix döntés (Trend × RSI × Saját Devizapár)
+    # 3. Kombinált mátrix döntés (Trend × RSI × Kategória-súlyozott Devizapár)
     if trend_state in ("UP_STRONG", "UP_PULLBACK"):
         if rsi_state in ("OVERSOLD_DEEP", "OVERSOLD_NEAR"):
             existing_act = "HÍGÍTÁS (DCA)"
             new_act = "ÉRDEMES VENNI"
-            score = 84 if strong_huf else 78
+            score = 84 if strong_huf else (80 if is_crypto else 76)
             if strong_huf and relevant_fx:
                 fx_extra = (
                     f" Ráadásul Gyenge {currency} / Erős HUF ({relevant_fx['rate']:.2f} Ft) zóna van, "
                     "így a devizaváltás is olcsó."
                 )
+            elif weak_huf and relevant_fx and is_crypto:
+                fx_extra = (
+                    f" Bár a {currency} magas ({relevant_fx['rate']:.2f} Ft), a kriptoeszköz nagy éves "
+                    "mozgásteréhez képest ez másodlagos, így nem akadálya a szakaszos vételnek."
+                )
             elif weak_huf and relevant_fx:
                 fx_extra = (
                     f" Figyelem: Erős {currency} / Gyenge HUF ({relevant_fx['rate']:.2f} Ft) zóna miatt "
-                    f"drága a {currency}, így forintból váltva kedvezőtlenebb a devizahatás."
+                    f"drága a {currency}, így forintból váltva csak óvatos részletekben érdemes belépni."
                 )
             else:
                 fx_extra = ""
@@ -740,7 +907,11 @@ def evaluate_technical_matrix(tech, currency="USD", fx_map=None):
             if strong_huf and relevant_fx:
                 fx_extra = (
                     f" (A Gyenge {currency} / Erős HUF árfolyam miatt devizát előre váltani kedvező, "
-                    "de a részvényvétellel érdemes támaszra várni.)"
+                    "de a belépéssel érdemes támaszra várni.)"
+                )
+            elif weak_huf and relevant_fx and is_crypto:
+                fx_extra = (
+                    f" (A {currency} árfolyama magas, de kriptónál ez másodlagos; inkább az RSI lehűlésére érdemes várni.)"
                 )
             elif weak_huf and relevant_fx:
                 fx_extra = (
@@ -758,12 +929,20 @@ def evaluate_technical_matrix(tech, currency="USD", fx_map=None):
         if rsi_state in ("OVERSOLD_DEEP", "OVERSOLD_NEAR"):
             existing_act = "TARTÁS"
             new_act = "KIVÁRÁS"
-            score = 42
+            score = 46 if is_crypto else 42
+            if is_crypto and weak_huf and relevant_fx:
+                fx_crypto_note = (
+                    f" Bár az USD/HUF magas ({relevant_fx['rate']:.2f} Ft), a kriptó nagy éves mozgásteréhez "
+                    "képest ez másodlagos — hosszú távú építkezéshez az RSI 35 fölé fordulásakor már "
+                    "indokolt lehet a szakaszos (részletekben történő) vétel."
+                )
+            else:
+                fx_crypto_note = " Új vétellel a hulló kés miatt ki kell várni az RSI 35 fölé fordulását."
             reason = (
                 f"Bár a rövid távú RSI ({rsi:.1f}) már túladott (eladni a pánik alján már késő, jöhet felpattanás), "
-                "az árfolyam az SMA 200 alatt van: új vétellel a hulló kés miatt ki kell várni az RSI 35 fölé fordulását."
+                f"az árfolyam az SMA 200 alatt van.{fx_crypto_note}"
             )
-            matrix_note = "🎯 **Kombinált döntés (SMA 200 alatt + Alacsony RSI = Hulló kés):** Pánikból eladni már késő (**Meglévő: TARTÁS**), de új pénzzel meg kell várni az RSI 35 fölé fordulását (**Új vétel: KIVÁRÁS**)."
+            matrix_note = "🎯 **Kombinált döntés (SMA 200 alatt + Alacsony RSI = Hulló kés):** Pánikból eladni már késő (**Meglévő: TARTÁS**), új pénzzel meg kell várni az RSI 35 fölé fordulását (**Új vétel: KIVÁRÁS**)."
         else:
             if trend_state == "DOWN_CONFIRMED":
                 existing_act = "RÉSZLEGES KITÁRAZÁS"
@@ -869,26 +1048,31 @@ def fetch_yahoo_data(ticker_symbol, asset_name):
 
 
 def analyze_all_assets_batch(raw_items, fx_map):
-    """EGYETLEN kötegelt Gemini API hívással elemzi az összes eszközt és fordítja le a híreket."""
+    """EGYETLEN kötegelt Gemini API hívással elemzi az összes eszközt kategória-súlyozott devizalogikával."""
     eur_summary = fx_map["EUR"]["summary"] if fx_map.get("EUR") else "EUR/HUF adat nem elérhető."
     usd_summary = fx_map["USD"]["summary"] if fx_map.get("USD") else "USD/HUF adat nem elérhető."
 
     assets_payload = []
     for item in raw_items:
         tech = item["tech"]
+        cat_cfg = CATEGORY_CONFIG.get(item.get("category", "STOCKS"), CATEGORY_CONFIG["STOCKS"])
         if tech:
             rsi_str = f"{tech['rsi_14']:.1f}" if tech["rsi_14"] is not None else "N/A"
             sma50_str = f"{tech['sma_50']:,.4f}" if tech["sma_50"] is not None else "N/A"
             sma200_str = f"{tech['sma_200']:,.4f}" if tech["sma_200"] is not None else "N/A"
+            range_str = f"{tech['range_52w_pct']:.0f}%" if tech.get("range_52w_pct") is not None else "N/A"
             tech_txt = (
                 f"Ár: {tech['price']:,.4f} ({tech['change_pct']:+.2f}%), "
-                f"RSI14: {rsi_str}, SMA50: {sma50_str}, SMA200: {sma200_str}, Trend: {tech['trend']}"
+                f"RSI14: {rsi_str}, SMA50: {sma50_str}, SMA200: {sma200_str}, "
+                f"52 hetes mozgástér: {range_str}, Trend: {tech['trend']}"
             )
         else:
             tech_txt = "Nincs technikai adat."
 
         assets_payload.append({
             "id": item["id"],
+            "category": cat_cfg["label"],
+            "is_crypto": cat_cfg["is_crypto"],
             "name": item["name"],
             "ticker": item["ticker"],
             "currency": item["currency"],
@@ -900,18 +1084,21 @@ def analyze_all_assets_batch(raw_items, fx_map):
 Gyakorlatias, kockázattudatos befektetési tanácsadóként viselkedsz egy magyar befektető számára.
 Elemezd az alábbi összes portfólióeszközt EGYETLEN válaszban.
 
---- DEVIZAKÖRNYEZET ÉS ÉRTELMEZÉSE (NAGYON FONTOS!) ---
+--- DEVIZAKÖRNYEZET ÉS KATEGÓRIA-SÚLYOZOTT ÉRTELMEZÉSE (NAGYON FONTOS!) ---
 - EUR eszközökhöz: {eur_summary}
 - USD eszközökhöz: {usd_summary}
 - HUF eszközökhöz: devizahatás nem értelmezhető, kizárólag a saját trendre és hírekre fókuszálj.
-- DEVIZA-SZABÁLY:
-  * "Erős USD / Gyenge HUF" (vagy "Erős EUR / Gyenge HUF") = a deviza DRÁGA forintban nézve! Ez ELADÁSRA / profitrealizálásra kedvező, de forintból történő ÚJ VÉTELRE KEDVEZŐTLEN (drága deviza). Soha ne írd ilyenkor, hogy a deviza gyenge vagy kedvez a vételnek!
-  * "Gyenge USD / Erős HUF" (vagy "Gyenge EUR / Erős HUF") = a deviza OLCSÓ forintban nézve! Ez kedvez az új devizaváltásnak és vételnek.
+- ALAPVETŐ DEVIZA-SZABÁLY:
+  - "Erős USD / Gyenge HUF" (vagy "Erős EUR / Gyenge HUF") = a deviza DRÁGA forintban nézve! Soha ne írd ilyenkor, hogy a deviza gyenge vagy olcsó!
+  - "Gyenge USD / Erős HUF" (vagy "Gyenge EUR / Erős HUF") = a deviza OLCSÓ forintban nézve.
+- KATEGÓRIA- ÉS VOLATILITÁSFÜGGŐ SÚLYOZÁS:
+  - **Hagyományos részvények, ETF-ek és befektetési jegyek (`is_crypto: false`) esetén:** Egy 10–13%-os devizafelár (Erős USD/EUR / Gyenge HUF) az éves hozampotenciál jelentős részét kiteszi, ezért **szigorúan bünteti** az új forintalapú vételt (drága deviza miatt óvatosságra/kivárásra ints).
+  - **Kriptovaluták (`is_crypto: true`) esetén:** A kriptók 52 hetes árfolyam-kilengése (gyakran 100–200%+) többszöröse a devizakilengésnek. Ha az USD/HUF 10% körül drágább, kifejezetten jelezd az indoklásban, hogy bár a forint gyengesége drágítja a belépőt, **a kripto saját történelmi ugrásaihoz és volatilitásához képest ez másodlagos súlyú** — így erős támasznál vagy mélyen túladott RSI-nél nem zárja ki a szakaszos (részletekben történő) vételt!
 
 --- DÖNTÉSI SZABÁLYOK (SZIGORÚAN TARTSD BE MIND az 5 PONTOT!) ---
-1. Emelkedő trendben (Ár > SMA 200) ÉS alacsony RSI (< 35) mellett: Meglévő = "HÍGÍTÁS (DCA)", Új vétel = "ÉRDEMES VENNI". (Jelezd a devizahatást: Gyenge USD/EUR esetén olcsó a váltás; Erős USD/EUR esetén figyelmeztess, hogy a deviza drága.)
+1. Emelkedő trendben (Ár > SMA 200) ÉS alacsony RSI (< 35) mellett: Meglévő = "HÍGÍTÁS (DCA)", Új vétel = "ÉRDEMES VENNI". (Részvénynél/ETF-nél figyelmeztess az erős USD/EUR devizafelárra; kriptónál jelezd, hogy a devizafelár a kripto volatilitása mellett másodlagos.)
 2. Emelkedő trendben (Ár > SMA 200) ÉS semleges vagy emelkedett RSI (35 <= RSI <= 70) mellett: Meglévő = "TARTÁS", Új vétel = "KIVÁRÁS". Kisebb napi/heti visszahúzódás önmagában NEM indokol vételt vagy hígítást, amíg az RSI 35 felett van!
-3. Megtört főtrendben (Ár < SMA 200) ÉS alacsony RSI (< 32) mellett ("hulló kés"): pánikból eladni már késő (Meglévő = "TARTÁS"), de új vételhez meg kell várni az RSI 35 fölé fordulását és a hírek tisztázódását (Új vétel = "KIVÁRÁS"). A Gyenge USD/EUR (erős forint) önmagában NEM indokol vételt!
+3. Megtört főtrendben (Ár < SMA 200) ÉS alacsony RSI (< 32) mellett ("hulló kés"): pánikból eladni már késő (Meglévő = "TARTÁS"), új vételhez meg kell várni az RSI 35 fölé fordulását (Új vétel = "KIVÁRÁS"). Kriptónál emeld ki, hogy a magas USD/HUF másodlagos súlyú, és az RSI fordulásakor szakaszosan (részletekben) érdemes lehet elkezdeni a vételt.
 4. Tartós csökkenő trendben (Ár < SMA 50 < SMA 200) ÉS nem túladott RSI (>= 32) mellett: Meglévő = "RÉSZLEGES KITÁRAZÁS", Új vétel = "KERÜLENDŐ".
 5. Túlvett RSI (> 70) esetén: ha az adott eszköz devizájánál "Erős USD / Gyenge HUF" vagy "Erős EUR / Gyenge HUF" zóna van, javasolj "RÉSZLEGES KITÁRAZÁS"-t forintra, különben "TARTÁS"-t; új vételre mindenképp "KIVÁRÁS"-t.
 
@@ -919,7 +1106,7 @@ Elemezd az alábbi összes portfólióeszközt EGYETLEN válaszban.
 {json.dumps(assets_payload, ensure_ascii=False)}
 
 Feladat minden egyes "id" kulcshoz:
-1. Dönts külön a MEGLÉVŐ pozícióról és az ÚJ vásárlásról a fenti 5 szabály alapján.
+1. Dönts külön a MEGLÉVŐ pozícióról és az ÚJ vásárlásról a fenti szabályok alapján.
 2. Fordítsd le magyarra a kapott angol/idegen nyelvű hírcímeket ("headlines").
 
 Válaszolj KIZÁRÓLAG érvényes JSON objektummal, ahol a legfelső szintű kulcsok az eszközök "id" értékei ("A0", "A1", ...), és minden eszköz alatt pontosan ezek a kulcsok szerepelnek:
@@ -927,7 +1114,7 @@ Válaszolj KIZÁRÓLAG érvényes JSON objektummal, ahol a legfelső szintű kul
 - "new_entry_action": pontosan egy ezekből: "ÉRDEMES VENNI", "KIVÁRÁS", "KERÜLENDŐ"
 - "plain_tech_summary": 1 rövid magyar mondat szakszavak (RSI/SMA) nélkül arról, hol áll az árfolyam
 - "sentiment_score": egész szám 1 és 100 között
-- "reasoning": 2 tömör magyar mondat arról, miért ezt javaslod most (sződd bele a híreket és a pontos "Erős/Gyenge USD/EUR" devizahatást is)
+- "reasoning": 2 tömör magyar mondat arról, miért ezt javaslod most (sződd bele a híreket és a kategória-súlyozott "Erős/Gyenge USD/EUR" devizahatást is)
 - "translated_news": lista a lefordított hírcímekkel (ha nem volt hír, [])
 """
 
@@ -944,7 +1131,7 @@ Válaszolj KIZÁRÓLAG érvényes JSON objektummal, ahol a legfelső szintű kul
 
 
 def get_badge_class(action_text):
-    """Meghatározza a kártyadoboz színét a döntés alapján."""
+    """Meghatározza a döntési doboz színét a jelzés alapján."""
     txt = action_text.upper()
     if "ÉRDEMES VENNI" in txt or "HÍGÍTÁS" in txt:
         return "badge-buy"
@@ -972,8 +1159,8 @@ def format_price(val):
     return f"{val:,.4f}" if val < 10 else f"{val:,.2f}"
 
 
-def render_technical_learning_panel(tech, currency="USD", fx_map=None):
-    """Látható SMA 50 / SMA 200 / RSI értékelő és az egységes mátrix szerinti tanuló magyarázat."""
+def render_technical_learning_panel(tech, currency="USD", fx_map=None, category="STOCKS"):
+    """Látható SMA 50 / SMA 200 / RSI / 52 hetes mozgástér értékelő és tanuló magyarázat."""
     if not tech:
         return
 
@@ -981,11 +1168,12 @@ def render_technical_learning_panel(tech, currency="USD", fx_map=None):
     sma50 = tech.get("sma_50")
     sma200 = tech.get("sma_200")
     rsi = tech.get("rsi_14")
-    eval_res = evaluate_technical_matrix(tech, currency, fx_map)
+    range_52w = tech.get("range_52w_pct")
+    eval_res = evaluate_technical_matrix(tech, currency, fx_map, category)
 
     st.markdown("##### 📐 Technikai mutatók és döntési logika (Tanuló nézet)")
 
-    t1, t2, t3 = st.columns(3)
+    t1, t2, t3, t4 = st.columns(4)
 
     if sma50 is not None and price is not None:
         diff50 = ((price - sma50) / sma50) * 100
@@ -1004,6 +1192,11 @@ def render_technical_learning_panel(tech, currency="USD", fx_map=None):
     else:
         t3.metric("RSI (14 napos)", "N/A", "Kevés adat (<15 nap)")
 
+    if range_52w is not None:
+        t4.metric("52 hetes kilengés", f"{range_52w:.0f}%", "Éves árfolyam-sáv")
+    else:
+        t4.metric("52 hetes kilengés", "N/A", "Kevés adat")
+
     st.info(
         f"{eval_res['trend_note']}\n\n"
         f"{eval_res['rsi_note']}\n\n"
@@ -1011,14 +1204,14 @@ def render_technical_learning_panel(tech, currency="USD", fx_map=None):
         f"{eval_res['matrix_rule_note']}"
     )
 
-    with st.expander("📘 Döntési mátrix puska: Mikor vételi jel az RSI < 30, és hogyan számít a deviza?"):
+    with st.expander("📘 Döntési mátrix puska: Mikor vételi jel az RSI < 30, és hogyan súlyozzuk a devizát?"):
         st.markdown(
             """
-- **Emelkedő főtrend (`Ár > SMA 200`) + Alacsony RSI (`< 35`):** Egészséges trendben átmeneti visszaesés → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI**. Ha közben **Gyenge USD/EUR (Erős HUF)** zóna van, dupla előny (olcsó részvény + olcsó deviza).
+- **Emelkedő főtrend (`Ár > SMA 200`) + Alacsony RSI (`< 35`):** Egészséges trendben átmeneti visszaesés → **HÍGÍTÁS (DCA) / ÉRDEMES VENNI**.
 - **Emelkedő főtrend (`Ár > SMA 200`) + Semleges RSI (`35–65`):** Egészséges trend, de még nincs diszkont → **Meglévő: TARTÁS**, **Új vétel: KIVÁRÁS**.
-- **Megtört főtrend (`Ár < SMA 200`) + Alacsony RSI (`< 32`) – „Hulló kés”:** Eladni a pánik alján már késő (**Meglévő: TARTÁS**), de új pénzzel meg kell várni, amíg az RSI visszafordul **35 fölé**, és tisztulnak a hírek (**Új vétel: KIVÁRÁS**). A Gyenge USD/EUR önmagában **nem** indokol részvényvételt.
-- **Tartós eső trend (`Ár < SMA 50 < SMA 200`) + Nem túladott RSI (`≥ 32`):** A felpattanások kockázatcsökkentésre valók → **RÉSZLEGES KITÁRAZÁS / Új vétel: KERÜLENDŐ**.
-- **Túlvett piac (`RSI > 70`):** Rövid távon túlhevült → **Új vétel: KIVÁRÁS**, devizás eszköznél **Erős USD/EUR (Gyenge HUF)** zónában **RÉSZLEGES KITÁRAZÁS**.
+- **Megtört főtrend (`Ár < SMA 200`) + Alacsony RSI (`< 32`) – „Hulló kés”:** Eladni a pánik alján már késő (**Meglévő: TARTÁS**), új pénzzel meg kell várni, amíg az RSI visszafordul **35 fölé** (**Új vétel: KIVÁRÁS**).
+- **Kategória- és volatilitásfüggő devizasúlyozás:** Egy 10–13%-os USD/HUF vagy EUR/HUF felár **részvénynél, ETF-nél és befektetési jegynél** komoly visszatartó erő, mert az éves hozampotenciál jelentős részét kiteszi. **Kriptovalutáknál** viszont a 100–200%+ éves árfolyam-kilengés mellett a devizafelár **másodlagos súlyú**, ezért erős támasznál / RSI-fordulónál nem akadálya a szakaszos pozícióépítésnek.
+- **Tartós eső trend (`Ár < SMA 50 < SMA 200`) + Nem túladott RSI (`≥ 32`):** Kockázatcsökkentés → **RÉSZLEGES KITÁRAZÁS / Új vétel: KERÜLENDŐ**.
             """
         )
 
@@ -1026,21 +1219,24 @@ def render_technical_learning_panel(tech, currency="USD", fx_map=None):
 def render_asset_details(item, fx_map=None):
     """Megjeleníti egy eszköz grafikonját, a tanuló SMA/RSI értékelőt és a magyar híreket."""
     tech = item["tech"]
+    cat_cfg = CATEGORY_CONFIG.get(item.get("category", "STOCKS"), CATEGORY_CONFIG["STOCKS"])
+    cat_color = cat_cfg["color"]
+
     if tech and tech.get("chart_df") is not None and len(tech["chart_df"]) >= 2:
         st.line_chart(
             tech["chart_df"],
-            color=["#FF6B00", "#0EA5E9", "#64748B"],
+            color=[cat_color, "#A855F7", "#64748B"],
             height=210,
         )
         st.markdown(
-            '<div class="legend-bar">📈 <strong>Grafikon:</strong> '
-            '<span style="color:#FF6B00;font-weight:700;">● Árfolyam</span> &nbsp;|&nbsp; '
-            '<span style="color:#64748B;font-weight:700;">● SMA 50 (50 napos átlag)</span> &nbsp;|&nbsp; '
-            '<span style="color:#0EA5E9;font-weight:700;">● SMA 200 (200 napos átlag)</span></div>',
+            f'<div class="legend-bar">📈 <strong>Grafikon:</strong> '
+            f'<span style="color:{cat_color};font-weight:700;">● Árfolyam</span> &nbsp;|&nbsp; '
+            f'<span style="color:#64748B;font-weight:700;">● SMA 50 (50 napos átlag)</span> &nbsp;|&nbsp; '
+            f'<span style="color:#A855F7;font-weight:700;">● SMA 200 (200 napos átlag)</span></div>',
             unsafe_allow_html=True,
         )
 
-    render_technical_learning_panel(tech, item.get("currency", "USD"), fx_map)
+    render_technical_learning_panel(tech, item.get("currency", "USD"), fx_map, item.get("category", "STOCKS"))
 
     with st.expander("📰 Elemzett hírek (magyarra fordítva)"):
         if item["news_list"]:
@@ -1054,14 +1250,19 @@ def render_asset_details(item, fx_map=None):
 
 
 def run_full_analysis_with_progress():
-    """Élő folyamatjelzővel futtatja az adatgyűjtést és az 1-hívásos kötegelt AI elemzést."""
+    """Élő folyamatjelzővel futtatja a 4 lapfül adatgyűjtését és az 1-hívásos kötegelt AI elemzést."""
     status_box = st.empty()
     progress_bar = st.progress(0)
 
-    status_box.info("1/4 • Csatlakozás a Google Táblázathoz...")
+    status_box.info("1/4 • Csatlakozás a Google Táblázat 4 kategóriafüléhez...")
     client = get_gspread_client()
-    assets = get_active_assets_from_sheet(client)
-    vig_funds = get_vig_funds_from_sheet(client)
+    spreadsheet = client.open_by_key(st.secrets["SHEET_ID"])
+
+    ticker_assets = []
+    for cat_key in ["STOCKS", "CRYPTO", "ETF"]:
+        ticker_assets.extend(get_ticker_assets_from_sheet(spreadsheet, cat_key))
+
+    vig_funds = get_vig_funds_from_sheet(spreadsheet)
     progress_bar.progress(15)
 
     status_box.info("2/4 • EUR/HUF és USD/HUF devizakörnyezet lekérése...")
@@ -1069,21 +1270,26 @@ def run_full_analysis_with_progress():
     progress_bar.progress(25)
 
     raw_items = []
-    total_count = len(assets) + len(vig_funds)
+    total_count = len(ticker_assets) + len(vig_funds)
 
-    for idx, asset in enumerate(assets):
-        ticker = str(asset["ticker"]).strip()
-        name = str(asset.get("name", ticker)).strip()
+    for idx, asset in enumerate(ticker_assets):
+        ticker = asset["ticker"]
+        name = asset["name"]
+        category = asset["category"]
         currency = infer_currency_from_ticker(ticker)
+        cat_short = CATEGORY_CONFIG[category]["short_label"]
 
         if total_count > 0:
             pct = 25 + int((idx / total_count) * 45)
             progress_bar.progress(min(70, pct))
-            status_box.info(f"3/4 • Árfolyamok letöltése ({idx + 1}/{total_count}): **{name}** ({ticker})...")
+            status_box.info(
+                f"3/4 • Árfolyamok letöltése ({idx + 1}/{total_count}) [{cat_short}]: **{name}** ({ticker})..."
+            )
 
         tech_data, news_items = fetch_yahoo_data(ticker, name)
         raw_items.append({
             "id": f"A{len(raw_items)}",
+            "category": category,
             "name": name,
             "ticker": ticker,
             "currency": currency,
@@ -1094,15 +1300,18 @@ def run_full_analysis_with_progress():
     if vig_funds:
         vig_news = search_news_fallback("VIG Asset Management")
         for f_idx, fund in enumerate(vig_funds):
-            step_num = len(assets) + f_idx + 1
+            step_num = len(ticker_assets) + f_idx + 1
             if total_count > 0:
                 pct = 25 + int(((step_num - 1) / total_count) * 45)
                 progress_bar.progress(min(70, pct))
-                status_box.info(f"3/4 • VIG alap feldolgozása ({step_num}/{total_count}): **{fund['name']}**...")
+                status_box.info(
+                    f"3/4 • VIG alap feldolgozása ({step_num}/{total_count}): **{fund['name']}**..."
+                )
 
             tech_data = calculate_technical_indicators(fund["hist_df"])
             raw_items.append({
                 "id": f"A{len(raw_items)}",
+                "category": "FUNDS",
                 "name": fund["name"],
                 "ticker": fund["ticker"],
                 "currency": fund["currency"],
@@ -1123,7 +1332,12 @@ def run_full_analysis_with_progress():
     for item in raw_items:
         ai_res = ai_map.get(item["id"])
         if not ai_res:
-            eval_res = evaluate_technical_matrix(item["tech"], item["currency"], fx_map)
+            eval_res = evaluate_technical_matrix(
+                item["tech"],
+                item["currency"],
+                fx_map,
+                item["category"],
+            )
             prefix = "[Szabályalapú mód] " if ai_err else ""
             ai_res = {
                 "existing_portfolio_action": eval_res["existing_action"],
@@ -1145,6 +1359,7 @@ def run_full_analysis_with_progress():
             })
 
         results.append({
+            "category": item["category"],
             "name": item["name"],
             "ticker": item["ticker"],
             "currency": item["currency"],
@@ -1178,6 +1393,24 @@ def get_shared_analysis():
     return run_full_analysis_with_progress()
 
 
+def render_category_header(cat_key, count):
+    """Színkódolt szekciófejlécet jelenít meg mind a listás, mind a kártyás nézetben."""
+    cfg = CATEGORY_CONFIG[cat_key]
+    color = cfg["color"]
+    bg = hex_to_rgba(color, 0.12)
+    border = hex_to_rgba(color, 0.35)
+    badge_bg = hex_to_rgba(color, 0.20)
+    st.markdown(
+        f"""
+        <div class="category-banner" style="background: {bg}; border: 1px solid {border}; border-left: 6px solid {color};">
+            <span style="color: {color};">{cfg['icon']} {cfg['label']}</span>
+            <span class="category-count" style="background: {badge_bg}; color: {color};">{count} eszköz</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # --- FELÜLET (UI) ---
 st.markdown(
     """
@@ -1189,7 +1422,7 @@ st.markdown(
             </svg>
             <span>AI PIACI IRÁNYTŰ</span>
         </h1>
-        <p>Gyors portfólió-döntéstámogató • Magyar blue chipek, nemzetközi eszközök, VIG alapok & EUR/USD/HUF hatás</p>
+        <p>Gyors portfólió-döntéstámogató • Részvények, Kriptovaluták, ETF-ek, VIG alapok & EUR/USD/HUF hatás</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1211,6 +1444,16 @@ with st.sidebar:
     if st.button("🔄 Frissítés most (Élő adat)", use_container_width=True):
         get_shared_analysis.clear()
         st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🎨 Eszközkategóriák")
+    for c_key in CATEGORY_ORDER:
+        c_cfg = CATEGORY_CONFIG[c_key]
+        st.markdown(
+            f'<div style="font-size: 0.84rem; margin-bottom: 4px;">'
+            f'<span style="color:{c_cfg["color"]}; font-weight:800;">■</span> {c_cfg["label"]}</div>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
     st.markdown("### 📧 E-mail Riasztások")
@@ -1239,13 +1482,13 @@ if ai_err:
     err_u = ai_err.upper()
     if "429" in err_u or "RESOURCE_EXHAUSTED" in err_u:
         st.info(
-            "ℹ️ **AI napi/perces kvótalimit elérve:** A portfólió automatikusan az egységesített "
-            "SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján értékelve jelenik meg."
+            "ℹ️ **AI napi/perces kvótalimit elérve:** A portfólió automatikusan a kategória- és "
+            "volatilitás-súlyozott SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján jelenik meg."
         )
     elif "503" in err_u or "UNAVAILABLE" in err_u or "TIMEOUT" in err_u:
         st.info(
-            "ℹ️ **Az AI szerver átmenetileg túlterhelt:** A portfólió automatikusan az egységesített "
-            "SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján értékelve jelenik meg."
+            "ℹ️ **Az AI szerver átmenetileg túlterhelt:** A portfólió automatikusan a kategória- és "
+            "volatilitás-súlyozott SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján jelenik meg."
         )
     else:
         st.warning(f"⚠️ **AI kiegészítő megjegyzés** (szabályalapú mód aktív): `{ai_err}`")
@@ -1261,13 +1504,13 @@ if fx_map and (fx_map.get("EUR") or fx_map.get("USD")):
 st.caption(f"⏱️ Frissítve: **{last_updated}** &nbsp;|&nbsp; 💾 {log_msg if log_ok else '⚠️ ' + log_msg}")
 
 if not data:
-    st.warning("Nincs 'IGEN' státuszú eszköz az 'Eszkozok' vagy 'VIG_Alapok' munkalapon.")
+    st.warning("Nincs 'IGEN' státuszú eszköz az 'Eszkozok', 'Kriptovaluták', 'ETF-ek' vagy 'VIG_alapok' munkalapon.")
     st.stop()
 
 alert_map = {}
 if alerts_enabled:
     for item in data:
-        item_uid = f"{item['name']}_{item['ticker']}"
+        item_uid = f"{item['category']}_{item['name']}_{item['ticker']}"
         sent, status_msg = check_and_send_alert(item)
         if status_msg:
             alert_map[item_uid] = (sent, status_msg)
@@ -1310,97 +1553,138 @@ if not filtered_data:
     st.info("A kiválasztott szűrőnek jelenleg egyetlen eszköz sem felel meg.")
     st.stop()
 
-# --- 1. LISTÁS NÉZET ---
+# --- 1. LISTÁS NÉZET (KATEGÓRIÁNKÉNT KÜLÖN TÁBLÁZAT) ---
 if view_mode == "📋 Listás nézet":
-    table_rows = []
-    for item in filtered_data:
-        tech = item["tech"]
-        price_str = format_price(tech["price"]) if tech else "N/A"
-        chg_str = f"{tech['change_pct']:+.2f}%" if tech else "N/A"
+    for cat_key in CATEGORY_ORDER:
+        cat_items = [x for x in filtered_data if x.get("category") == cat_key]
+        if not cat_items:
+            continue
 
-        table_rows.append({
-            "Eszköz": f"{item['name']} ({item['ticker']})",
-            "Deviza": item["currency"],
-            "Árfolyam": price_str,
-            "Napi %": chg_str,
-            "Saját pozíció": item["existing_action"],
-            "Új vásárlás": item["new_entry_action"],
-            "Helyzetkép": item["plain_tech"],
-            "Indoklás": item["reasoning"],
-        })
+        render_category_header(cat_key, len(cat_items))
 
-    df_list = pd.DataFrame(table_rows)
-    table_height = min(680, 42 + len(df_list) * 38)
-    st.dataframe(df_list, use_container_width=True, hide_index=True, height=table_height)
+        table_rows = []
+        for item in cat_items:
+            tech = item["tech"]
+            price_str = format_price(tech["price"]) if tech else "N/A"
+            chg_str = f"{tech['change_pct']:+.2f}%" if tech else "N/A"
+            range_str = f"{tech['range_52w_pct']:.0f}%" if (tech and tech.get("range_52w_pct") is not None) else "N/A"
+
+            table_rows.append({
+                "Eszköz": f"{item['name']} ({item['ticker']})",
+                "Deviza": item["currency"],
+                "Árfolyam": price_str,
+                "Napi %": chg_str,
+                "52h sáv": range_str,
+                "Saját pozíció": item["existing_action"],
+                "Új vásárlás": item["new_entry_action"],
+                "Helyzetkép": item["plain_tech"],
+                "Indoklás": item["reasoning"],
+            })
+
+        df_list = pd.DataFrame(table_rows)
+        table_height = min(520, 42 + len(df_list) * 38)
+        st.dataframe(df_list, use_container_width=True, hide_index=True, height=table_height)
 
     st.markdown("---")
+    option_labels = [
+        f"[{CATEGORY_CONFIG[item['category']]['short_label']}] {item['name']} ({item['ticker']})"
+        for item in filtered_data
+    ]
     selected_label = st.selectbox(
         "🔎 Grafikon, SMA/RSI értékelő és magyarított hírek megtekintése ehhez az eszközhöz:",
-        [f"{item['name']} ({item['ticker']})" for item in filtered_data],
+        option_labels,
     )
-    selected_item = next(
-        (x for x in filtered_data if f"{x['name']} ({x['ticker']})" == selected_label),
-        None,
-    )
+    selected_idx = option_labels.index(selected_label)
+    selected_item = filtered_data[selected_idx]
+
     if selected_item:
+        sel_cfg = CATEGORY_CONFIG[selected_item["category"]]
         with st.container(border=True):
             st.markdown(
-                f"**{selected_item['name']} ({selected_item['ticker']})** — "
-                f"Saját pozíció: **{selected_item['existing_action']}** | "
-                f"Új vétel: **{selected_item['new_entry_action']}**"
+                f'<div style="border-left: 4px solid {sel_cfg["color"]}; padding-left: 10px; margin-bottom: 8px;">'
+                f'<span style="color:{sel_cfg["color"]}; font-weight:800;">{sel_cfg["icon"]} {sel_cfg["label"]}</span><br>'
+                f'<strong>{selected_item["name"]} ({selected_item["ticker"]})</strong> — '
+                f'Saját pozíció: <strong>{selected_item["existing_action"]}</strong> | '
+                f'Új vétel: <strong>{selected_item["new_entry_action"]}</strong>'
+                f'</div>',
+                unsafe_allow_html=True,
             )
             st.write(selected_item["reasoning"])
             render_asset_details(selected_item, fx_map)
 
-# --- 2. KÁRTYÁS NÉZET ---
+# --- 2. KÁRTYÁS NÉZET (KATEGÓRIÁNKÉNT SZÍNKÓDOLT SZEKCIÓK) ---
 else:
-    cols = st.columns(2)
-    for idx, item in enumerate(filtered_data):
-        item_uid = f"{item['name']}_{item['ticker']}"
-        alert_status = alert_map.get(item_uid)
-        with cols[idx % 2]:
-            with st.container(border=True):
-                tech = item["tech"]
+    for cat_key in CATEGORY_ORDER:
+        cat_items = [x for x in filtered_data if x.get("category") == cat_key]
+        if not cat_items:
+            continue
 
-                c1, c2 = st.columns([2, 1])
-                with c1:
+        cfg = CATEGORY_CONFIG[cat_key]
+        cat_color = cfg["color"]
+        cat_bg = hex_to_rgba(cat_color, 0.12)
+        cat_border = hex_to_rgba(cat_color, 0.35)
+
+        render_category_header(cat_key, len(cat_items))
+
+        cols = st.columns(2)
+        for idx, item in enumerate(cat_items):
+            item_uid = f"{item['category']}_{item['name']}_{item['ticker']}"
+            alert_status = alert_map.get(item_uid)
+            with cols[idx % 2]:
+                with st.container(border=True):
+                    tech = item["tech"]
+
                     st.markdown(
-                        f'<div class="asset-header"><div><span class="asset-name">{item["name"]}</span>'
-                        f'<span class="asset-ticker">{item["ticker"]}</span></div></div>',
+                        f'<div style="height: 4px; background: {cat_color}; border-radius: 3px; margin: -4px 0 10px 0;"></div>'
+                        f'<div class="cat-tag" style="background: {cat_bg}; color: {cat_color}; border: 1px solid {cat_border};">'
+                        f'{cfg["icon"]} {cfg["short_label"]}</div>',
                         unsafe_allow_html=True,
                     )
-                with c2:
-                    if tech:
-                        st.metric("Árfolyam", format_price(tech["price"]), f"{tech['change_pct']:+.2f}%")
-                    else:
-                        st.metric("Árfolyam", "N/A")
 
-                ex_class = get_badge_class(item["existing_action"])
-                new_class = get_badge_class(item["new_entry_action"])
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        st.markdown(
+                            f'<div class="asset-header" style="border-bottom: 2px solid {cat_border};">'
+                            f'<div><span class="asset-name" style="color: {cat_color};">{item["name"]}</span>'
+                            f'<span class="asset-ticker">{item["ticker"]}</span></div></div>',
+                            unsafe_allow_html=True,
+                        )
+                    with c2:
+                        if tech:
+                            st.metric("Árfolyam", format_price(tech["price"]), f"{tech['change_pct']:+.2f}%")
+                        else:
+                            st.metric("Árfolyam", "N/A")
 
-                st.markdown(
-                    f"""
-                    <div class="decision-grid">
-                        <div class="decision-box {ex_class}">
-                            <div class="decision-label">Saját pozícióra</div>
-                            <div class="decision-value">{item['existing_action']}</div>
+                    ex_class = get_badge_class(item["existing_action"])
+                    new_class = get_badge_class(item["new_entry_action"])
+
+                    st.markdown(
+                        f"""
+                        <div class="decision-grid">
+                            <div class="decision-box {ex_class}">
+                                <div class="decision-label">Saját pozícióra</div>
+                                <div class="decision-value">{item['existing_action']}</div>
+                            </div>
+                            <div class="decision-box {new_class}">
+                                <div class="decision-label">Új vásárlásra</div>
+                                <div class="decision-value">{item['new_entry_action']}</div>
+                            </div>
                         </div>
-                        <div class="decision-box {new_class}">
-                            <div class="decision-label">Új vásárlásra</div>
-                            <div class="decision-value">{item['new_entry_action']}</div>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
-                if item["plain_tech"]:
-                    st.markdown(f'<div class="tech-pill">🧭 {item["plain_tech"]}</div>', unsafe_allow_html=True)
+                    if item["plain_tech"]:
+                        st.markdown(
+                            f'<div class="tech-pill" style="background: {cat_bg}; border: 1px solid {cat_border};">'
+                            f'🧭 {item["plain_tech"]}</div>',
+                            unsafe_allow_html=True,
+                        )
 
-                st.write(item["reasoning"])
+                    st.write(item["reasoning"])
 
-                if alert_status:
-                    _, msg_text = alert_status
-                    st.caption(f"🔔 Riasztás: **{msg_text}**")
+                    if alert_status:
+                        _, msg_text = alert_status
+                        st.caption(f"🔔 Riasztás: **{msg_text}**")
 
-                render_asset_details(item, fx_map)
+                    render_asset_details(item, fx_map)
