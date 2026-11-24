@@ -15,6 +15,7 @@ from google import genai
 from google.oauth2.service_account import Credentials
 import gspread
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
@@ -90,52 +91,56 @@ def _send_gemini_request(client, model_name, prompt):
     response = client.models.generate_content(
         model=model_name,
         contents=prompt,
+        config={"response_mime_type": "application/json"},
     )
     return response.text or ""
 
 
 def call_gemini_single_batch(prompt):
-    """Kötegelt kérést küld az ingyenes Gemini API-nak, 503-as terhelési csúcs esetén rövid újrapróbálkozással."""
+    """Kötegelt kérést küld a Gemini 3.x API-nak, 35 mp-es időkorláttal és automatikus modellváltással."""
     api_key = get_clean_gemini_key()
     if not api_key:
         raise RuntimeError("Hiányzik a GEMINI_API_KEY a Secrets beállításokból.")
 
     client = genai.Client(vertexai=False, api_key=api_key)
-    last_err = None
+    errors_log = []
 
     for model_name in ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]:
-        for attempt in range(3):
+        for attempt in range(2):
             executor = ThreadPoolExecutor(max_workers=1)
             future = executor.submit(_send_gemini_request, client, model_name, prompt)
             try:
-                result_text = future.result(timeout=15)
+                result_text = future.result(timeout=35)
                 executor.shutdown(wait=False)
-                return result_text
+                if result_text.strip():
+                    return result_text
+                raise ValueError(f"Üres válasz érkezett ({model_name}).")
             except FuturesTimeoutError:
-                executor.shutdown(wait=False)
-                last_err = TimeoutError(f"A modell ({model_name}) 15 másodpercen belül nem válaszolt.")
-                if attempt < 2:
-                    time.sleep(2 * (attempt + 1))
+                executor.shutdown(wait=False, cancel_futures=True)
+                errors_log.append(f"{model_name}: időtúllépés (35 mp)")
+                if attempt == 0:
+                    time.sleep(2)
                     continue
                 break
             except Exception as e:
-                executor.shutdown(wait=False)
-                last_err = e
+                executor.shutdown(wait=False, cancel_futures=True)
+                errors_log.append(f"{model_name}: {e}")
                 err_upper = str(e).upper()
                 if "503" in err_upper or "UNAVAILABLE" in err_upper:
-                    if attempt < 2:
-                        time.sleep(2 * (attempt + 1))
+                    if attempt == 0:
+                        time.sleep(2)
                         continue
                     break
                 if "429" in err_upper or "RESOURCE_EXHAUSTED" in err_upper:
+                    if attempt == 0:
+                        time.sleep(3)
+                        continue
                     break
                 if any(code in err_upper for code in ["API_KEY", "API KEY", "400", "403", "404", "NOT_FOUND"]):
                     break
                 raise e
 
-    if last_err is not None:
-        raise last_err
-    raise RuntimeError("Nem sikerült kapcsolódni a Gemini API-hoz.")
+    raise RuntimeError(" | ".join(errors_log[-2:]) if errors_log else "Nem sikerült kapcsolódni a Gemini API-hoz.")
 
 
 def get_gspread_client():
@@ -317,9 +322,17 @@ def process_alerts_batch(spreadsheet, results):
 def _fetch_single_fx_pair(ticker_symbol, pair_label):
     """Lekéri egy konkrét devizapár (pl. EUR/HUF vagy USD/HUF) 1 éves pozícióját és devizafelárát."""
     try:
-        hist = yf.Ticker(ticker_symbol).history(period="1y", interval="1d", timeout=10)
+        ticker = yf.Ticker(ticker_symbol)
+        hist = ticker.history(period="1y", interval="1d", timeout=10)
         if hist is None or hist.empty or "Close" not in hist:
             return None
+
+        try:
+            live_fx = ticker.fast_info.get("last_price")
+            if live_fx and float(live_fx) > 0:
+                hist.iloc[-1, hist.columns.get_loc("Close")] = float(live_fx)
+        except Exception:
+            pass
 
         close = hist["Close"].dropna()
         if len(close) < 2:
@@ -1083,11 +1096,18 @@ def search_news_fallback(query_text):
 
 
 def fetch_yahoo_data(ticker_symbol, asset_name):
-    """Lekéri a 2 éves grafikonadatokat és a legfontosabb híreket (időtúllépés-védelemmel)."""
+    """Lekéri a 2 éves grafikonadatokat (élő napközbeni árral frissítve) és a legfontosabb híreket."""
     ticker = yf.Ticker(ticker_symbol)
 
     try:
         hist = ticker.history(period="2y", interval="1d", timeout=10)
+        if hist is not None and not hist.empty and "Close" in hist:
+            try:
+                live_price = ticker.fast_info.get("last_price")
+                if live_price and float(live_price) > 0:
+                    hist.iloc[-1, hist.columns.get_loc("Close")] = float(live_price)
+            except Exception:
+                pass
         tech_data = calculate_technical_indicators(hist)
     except Exception:
         tech_data = None
@@ -1403,13 +1423,13 @@ def render_technical_learning_panel(tech, currency="USD", fx_map=None, category=
 
     if sma50 is not None and price is not None:
         diff50 = ((price - sma50) / sma50) * 100
-        t1.metric("SMA 50 (középtáv)", format_price(sma50), f"{diff50:+.1f}% az árhoz képest")
+        t1.metric("SMA 50 (középtáv)", format_price(sma50), f"Ár: {diff50:+.1f}% az SMA 50-hez képest")
     else:
         t1.metric("SMA 50 (középtáv)", "N/A", "Kevés adat (<50 nap)")
 
     if sma200 is not None and price is not None:
         diff200 = ((price - sma200) / sma200) * 100
-        t2.metric("SMA 200 (hosszú táv)", format_price(sma200), f"{diff200:+.1f}% az árhoz képest")
+        t2.metric("SMA 200 (hosszú táv)", format_price(sma200), f"Ár: {diff200:+.1f}% az SMA 200-hoz képest")
     else:
         t2.metric("SMA 200 (hosszú táv)", "N/A", "Kevés adat (<200 nap)")
 
@@ -1442,6 +1462,53 @@ def render_technical_learning_panel(tech, currency="USD", fx_map=None, category=
         )
 
 
+def render_price_chart(chart_df, cat_color):
+    """Mobilbarát Plotly árfolyamgrafikon beragadó tooltip és levágott jelmagyarázat nélkül."""
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=chart_df.index,
+        y=chart_df["Árfolyam"],
+        mode="lines",
+        name="Árfolyam",
+        line=dict(color=cat_color, width=2.4),
+    ))
+    fig.add_trace(go.Scatter(
+        x=chart_df.index,
+        y=chart_df["SMA 50"],
+        mode="lines",
+        name="SMA 50 (50n)",
+        line=dict(color="#64748B", width=1.6),
+    ))
+    fig.add_trace(go.Scatter(
+        x=chart_df.index,
+        y=chart_df["SMA 200"],
+        mode="lines",
+        name="SMA 200 (200n)",
+        line=dict(color="#A855F7", width=1.8),
+    ))
+
+    fig.update_layout(
+        height=265,
+        margin=dict(l=8, r=8, t=34, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        hovermode="x",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            font=dict(size=11),
+        ),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.16)"),
+    )
+
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
 def render_asset_details(item, fx_map=None):
     """Megjeleníti egy eszköz grafikonját, a tanuló SMA/RSI értékelőt és a magyar híreket."""
     tech = item["tech"]
@@ -1457,18 +1524,7 @@ def render_asset_details(item, fx_map=None):
         st.caption(" &nbsp;|&nbsp; ".join(meta_parts))
 
     if tech and tech.get("chart_df") is not None and len(tech["chart_df"]) >= 2:
-        st.line_chart(
-            tech["chart_df"],
-            color=[cat_color, "#A855F7", "#64748B"],
-            height=210,
-        )
-        st.markdown(
-            f'<div class="legend-bar">📈 <strong>Grafikon:</strong> '
-            f'<span style="color:{cat_color};font-weight:700;">● Árfolyam</span> &nbsp;|&nbsp; '
-            f'<span style="color:#64748B;font-weight:700;">● SMA 50 (50 napos átlag)</span> &nbsp;|&nbsp; '
-            f'<span style="color:#A855F7;font-weight:700;">● SMA 200 (200 napos átlag)</span></div>',
-            unsafe_allow_html=True,
-        )
+        render_price_chart(tech["chart_df"], cat_color)
 
     render_technical_learning_panel(tech, item.get("currency", "USD"), fx_map, item.get("category", "STOCKS"))
 
@@ -1534,6 +1590,10 @@ def render_streamlit_app():
         """
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+
+        #vg-tooltip-element {
+            display: none !important;
+        }
 
         html, body, [class*="css"] {
             font-family: 'Plus Jakarta Sans', sans-serif;
@@ -1780,7 +1840,7 @@ def render_streamlit_app():
                 "ℹ️ **AI napi/perces kvótalimit elérve:** A portfólió automatikusan a kategória- és "
                 "volatilitás-súlyozott SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján jelenik meg."
             )
-        elif "503" in err_u or "UNAVAILABLE" in err_u or "TIMEOUT" in err_u:
+        elif "503" in err_u or "UNAVAILABLE" in err_u or "IDŐTÚLLÉPÉS" in err_u or "TIMEOUT" in err_u:
             st.info(
                 "ℹ️ **Az AI szerver átmenetileg túlterhelt:** A portfólió automatikusan a kategória- és "
                 "volatilitás-súlyozott SMA 50 / SMA 200 / RSI + EUR/USD devizamátrix alapján jelenik meg."
