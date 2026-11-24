@@ -1,7 +1,9 @@
 streamlit
+yfinance
 gspread
 google-auth
-yfinance
 google-genai
 pandas
-feedparser
+plotly
+requests
+beautifulsoup4
