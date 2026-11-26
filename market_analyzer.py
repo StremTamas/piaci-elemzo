@@ -2276,4 +2276,23 @@ def render_streamlit_app():
 
 
 if __name__ == "__main__":
-    render_streamlit_app()
+    import os
+    import sys
+
+    if "--headless" in sys.argv or os.environ.get("GITHUB_ACTIONS") == "true":
+        print("Automata 0-24h piacelemzés indítása...")
+        results, _, ts, log_ok, log_msg, ai_err, alert_map = run_core_analysis(
+            progress_cb=lambda pct, msg: print(f"[{pct}%] {msg}"),
+            trigger_source="Automata 0-24h",
+            send_alerts=True,
+        )
+        print(f"Időpont: {ts} | Elemzett eszközök: {len(results)} db")
+        print(f"Naplózás: {log_msg}")
+        if ai_err:
+            print(f"AI figyelmeztetés (szabályalapú tartalék futott): {ai_err}")
+        if alert_map:
+            print(f"Riasztások: {alert_map}")
+        if not log_ok:
+            sys.exit(1)
+    else:
+        render_streamlit_app()
