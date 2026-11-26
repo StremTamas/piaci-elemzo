@@ -33,4 +33,4 @@ jobs:
           printf "%s\n" "$SECRETS_CONTENT" > .streamlit/secrets.toml
 
       - name: Elemzes futtatasa
-        run: python market_analyzer.py
+        run: python market_analyzer.py --headless
